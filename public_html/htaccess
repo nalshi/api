@@ -1,0 +1,106 @@
+RewriteEngine On
+RewriteBase /
+
+# 1. توجيه الصفحة الرئيسية (الدومين مباشرة) لفتح المتجر
+RewriteRule ^$ public_html/index.html [L]
+
+# 2. إخفاء مجلد public_html من الرابط إذا كتبه شخص يدوياً
+RewriteCond %{THE_REQUEST} \s/public_html/([^\s?]*) [NC]
+RewriteRule ^ %1 [L,NE,R=301]
+
+# 3. توجيه الملفات الحقيقية (مثل الصور، ملفات التنسيق، الجافاسكربت) لتقرأ من public_html بصمت
+RewriteCond %{REQUEST_URI} !^/public_html/
+RewriteCond %{DOCUMENT_ROOT}/public_html%{REQUEST_URI} -f [OR]
+RewriteCond %{DOCUMENT_ROOT}/public_html%{REQUEST_URI} -d
+RewriteRule ^(.*)$ public_html/$1 [L]
+
+# 4. الروابط النظيفة (للمتاجر والمنتجات)
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule ^([a-zA-Z0-9_.-]+)/(prod_[a-zA-Z0-9_.-]+)/?$ public_html/index.html?username=$1&product_id=$2 [L,QSA]
+
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule ^([a-zA-Z0-9_.-]+)/?$ public_html/index.html?username=$1 [L,QSA]
+
+# ========================================================
+
+# 1. تفعيل التخزين المؤقت للصور (Browser Caching) لتوفير الإنترنت
+
+# ========================================================
+
+<IfModule mod_expires.c>
+
+    ExpiresActive On
+
+    
+
+    # حفظ الصور في ذاكرة هاتف الزبون لمدة سنة كاملة
+
+    ExpiresByType image/jpg "access plus 1 year"
+
+    ExpiresByType image/jpeg "access plus 1 year"
+
+    ExpiresByType image/gif "access plus 1 year"
+
+    ExpiresByType image/png "access plus 1 year"
+
+    ExpiresByType image/webp "access plus 1 year"
+
+    ExpiresByType image/svg+xml "access plus 1 year"
+
+    
+
+    # حفظ الخطوط والملفات الثابتة لمدة شهر
+
+    ExpiresByType text/css "access plus 1 month"
+
+    ExpiresByType application/javascript "access plus 1 month"
+
+    ExpiresByType font/woff2 "access plus 1 year"
+
+</IfModule>
+
+# ========================================================
+
+# 2. تأكيد التخزين عبر ترويسات Cache-Control
+
+# ========================================================
+
+<IfModule mod_headers.c>
+
+    <FilesMatch "\.(jpg|jpeg|png|gif|webp|svg|ico)$">
+
+        Header set Cache-Control "max-age=31536000, public, immutable"
+
+    </FilesMatch>
+
+    <FilesMatch "\.(css|js)$">
+
+        Header set Cache-Control "max-age=2592000, public"
+
+    </FilesMatch>
+</IfModule>
+<IfModule mod_rewrite.c>
+
+    RewriteEngine On
+
+    RewriteBase /
+
+    # إذا كان الرابط لا يشير إلى ملف أو مجلد حقيقي موجود في الاستضافة
+
+    RewriteCond %{REQUEST_FILENAME} !-f
+
+    RewriteCond %{REQUEST_FILENAME} !-d
+
+    # قم بتوجيه الزائر إلى index.php
+
+    RewriteRule ^(.*)$ index.html [L,QSA]
+
+</IfModule>
+
+
+
+
+
+
