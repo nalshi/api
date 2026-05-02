@@ -50,7 +50,7 @@ header("Cache-Control: no-store, no-cache, must-revalidate, max-age=0");
 $allowed_origins =[
     'http://vay.rf.gd',       // استضافتك الحالية (بدون HTTPS)
     'https://vay.rf.gd',      // استضافتك الحالية (مع HTTPS)
-    'https://nnyy.netlify.app' // استضافة Netlify الخاصة بك (تأكد من الرابط)
+    'https://nynn.pages.dev' // استضافة Netlify الخاصة بك (تأكد من الرابط)
 ];
 
 // السماح لبيئة التطوير المحلية (Localhost) إذا كنت تبرمج على جهازك
@@ -1357,7 +1357,7 @@ case 'get_initial_data':
                 'attempts' => 0
             ];
             $state_token = generate_signed_token($token_payload, 5);
-            setcookie('state_token', $state_token, time() + 300, '/', '', $is_secure_cookie, true);
+            setcookie('state_token', $state_token, ['expires' => time() + 300, 'path' => '/', 'domain' => '', 'secure' => true, 'httponly' => true, 'samesite' => 'None']);
             
             $pdo->prepare("INSERT INTO rate_limits (ip_address, phone_number) VALUES (?, ?)")->execute([$ip_address, $phone]);
 
@@ -1419,9 +1419,9 @@ case 'get_initial_data':
             'expires' => time() + (86400 * 60),
             'path' => '/',
             'domain' => '',
-            'secure' => $is_secure_cookie,
+            'secure' => true,
             'httponly' => true,
-            'samesite' => 'Strict'
+            'samesite' => 'None'
         ]);
     } catch (PDOException $token_error) {}
     
@@ -1503,9 +1503,9 @@ break; // <-- وهذه هي الـ break; المفقودة التي تم إضا�
                     'expires' => time() - 3600,
                     'path' => '/',
                     'domain' => '',
-                    'secure' => $is_secure_cookie,
+                    'secure' => true,
                     'httponly' => true,
-                    'samesite' => 'Strict'
+                    'samesite' => 'None'
                 ]);
             }
             unset($_SESSION['customer_id'], $_SESSION['customer_name']);
@@ -2317,7 +2317,7 @@ break; // <-- وهذه هي الـ break; المفقودة التي تم إضا�
                 
                 $token_payload =[ 'purpose' => 'new_device_login', 'phone' => $phone_to_check, 'valid_logins' => $valid_logins, 'otp' => $otp, 'attempts' => 0 ];
                 $state_token = generate_signed_token($token_payload, 5);
-                setcookie('state_token', $state_token, time() + 300, '/', '', $is_secure_cookie, true);
+                setcookie('state_token', $state_token, ['expires' => time() + 300, 'path' => '/', 'domain' => '', 'secure' => true, 'httponly' => true, 'samesite' => 'None']);
                 
                 $message = "رمز التحقق لتسجيل الدخول من جهاز جديد هو: {$otp}";
                 // ⭐ مسح الأكواد القديمة
@@ -2395,9 +2395,7 @@ break; // <-- وهذه هي الـ break; المفقودة التي تم إضا�
                 'expires' => time() + (86400 * 365), 
                 'path' => '/',
                 'domain' => '',
-                'secure' => $is_secure_cookie,
-                'httponly' => true,
-                'samesite' => 'Strict'
+               'secure' => true, 'httponly' => true, 'samesite' => 'None'
             ]);
             
             setcookie('state_token', '', time() - 3600, '/'); 
@@ -2561,7 +2559,7 @@ break; // <-- وهذه هي الـ break; المفقودة التي تم إضا�
             $new_device_token = bin2hex(random_bytes(32));
             $user_agent = $_SERVER['HTTP_USER_AGENT'] ?? 'Unknown';
             $pdo->prepare("INSERT INTO trusted_devices (user_id, device_token, user_agent) VALUES (?, ?, ?)")->execute([$new_merchant_id, $new_device_token, $user_agent]);
-            setcookie('device_token', $new_device_token, ['expires' => time() + (86400 * 365), 'path' => '/', 'domain' => '', 'secure' => $is_secure_cookie, 'httponly' => true, 'samesite' => 'Strict']);
+            setcookie('device_token', $new_device_token, ['expires' => time() + (86400 * 365), 'path' => '/', 'domain' => '', 'secure' => true, 'httponly' => true, 'samesite' => 'None'
 
             $initData = [
                 'details' => [
@@ -2921,7 +2919,7 @@ break; // <-- وهذه هي الـ break; المفقودة التي تم إضا�
                 $new_device_token = bin2hex(random_bytes(32));
                 $user_agent = $_SERVER['HTTP_USER_AGENT'] ?? 'Unknown';
                 $pdo->prepare("INSERT INTO trusted_devices (user_id, device_token, user_agent) VALUES (?, ?, ?)")->execute([$recovered_uid, $new_device_token, $user_agent]);
-                setcookie('device_token', $new_device_token, ['expires' => time() + (86400 * 365), 'path' => '/', 'domain' => '', 'secure' => $is_secure_cookie, 'httponly' => true, 'samesite' => 'Strict']);
+                setcookie('device_token', $new_device_token, ['expires' => time() + (86400 * 365), 'path' => '/', 'domain' => '', 'secure' => true, 'httponly' => true, 'samesite' => 'None']);
             }
             
             setcookie('state_token', '', time() - 3600, '/'); 
@@ -2938,9 +2936,7 @@ break; // <-- وهذه هي الـ break; المفقودة التي تم إضا�
                     'expires' => time() - 3600,
                     'path' => '/',
                     'domain' => '',
-                    'secure' => $is_secure_cookie,
-                    'httponly' => true,
-                    'samesite' => 'Strict'
+                   'secure' => true, 'httponly' => true, 'samesite' => 'None'
                 ]);
             }
             
@@ -3001,9 +2997,7 @@ break; // <-- وهذه هي الـ break; المفقودة التي تم إضا�
                         'expires' => time() - 3600,
                         'path' => '/',
                         'domain' => '',
-                        'secure' => $is_secure_cookie,
-                        'httponly' => true,
-                        'samesite' => 'Strict'
+                       'secure' => true, 'httponly' => true, 'samesite' => 'None'
                     ]);
                     session_destroy();
                     send_response('success',['message' => 'تم إلغاء الثقة بالجهاز الحالي بنجاح. سيتم تسجيل خروجك الآن.', 'force_logout' => true]);
