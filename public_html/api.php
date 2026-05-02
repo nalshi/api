@@ -1,3 +1,4 @@
+
 <?php
 // =======================================================
 // ملف API الشامل (النسخة المتطورة أمنياً - الجدار الأمني 10.5)
@@ -715,7 +716,7 @@ try {
     $exempted_actions =[
         // مسارات الشركاء
         'login', 'check_phone', 'verify_new_device_otp', 'resend_device_otp', 'select_role', 
-        'register_init', 'register_verify', 'recover_init', 'recover_check_otp', 'recover_set_password','check_store_updates', 'check_customer_session' // أضف هؤلاء هنا
+        'register_init', 'register_verify', 'recover_init', 'recover_check_otp', 'recover_set_password','check_store_updates', 'check_customer_session', // أضف هؤلاء هنا
         
         // مسارات العملاء
         'get_initial_data', 'check_store_updates', 'get_public_products', 'public_search_products', 
