@@ -15,7 +15,6 @@ if (session_status() === PHP_SESSION_NONE) {
 // 2. إعدادات قاعدة البيانات (TiDB Cloud) 
 // =====================================
 define('DB_HOST', 'sql.freedb.tech'); 
-define('DB_PORT', '3306'); 
 define('DB_USER', 'u_kQ8mJS'); // تم التحديث من صورتك
 define('DB_PASS', 'q7Qyb4plyITW');    // تم التحديث من صورتك
 define('DB_NAME', 'freedb_bctAicO1'); 
