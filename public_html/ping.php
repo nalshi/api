@@ -1,4 +1,4 @@
-here<?php
+<?php
 // ملف فحص الاتصال وتجاوز حماية CORS
 header("Access-Control-Allow-Origin: *"); // السماح للجميع مؤقتاً للفحص
 header("Access-Control-Allow-Methods: POST, GET, OPTIONS");
