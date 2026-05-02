@@ -14,11 +14,11 @@ if (session_status() === PHP_SESSION_NONE) {
 // =====================================
 // 2. إعدادات قاعدة البيانات (TiDB Cloud) 
 // =====================================
-define('DB_HOST', 'gateway01.eu-central-1.prod.aws.tidbcloud.com'); 
-define('DB_PORT', '4000'); 
-define('DB_USER', '4WSCPbQrZ9Fd23S.root'); // تم التحديث من صورتك
-define('DB_PASS', '8tXnP3JoV61OX7Df');    // تم التحديث من صورتك
-define('DB_NAME', 'github_sample'); 
+define('DB_HOST', 'sql.freedb.tech'); 
+define('DB_PORT', '3306'); 
+define('DB_USER', 'u_kQ8mJS'); // تم التحديث من صورتك
+define('DB_PASS', 'q7Qyb4plyITW');    // تم التحديث من صورتك
+define('DB_NAME', 'freedb_bctAicO1'); 
 
 // =====================================
 // 3. إعدادات التطبيق الأساسية
