@@ -17,7 +17,7 @@ if (session_status() === PHP_SESSION_NONE) {
 define('DB_HOST', 'gateway01.eu-central-1.prod.aws.tidbcloud.com'); 
 define('DB_PORT', '4000'); 
 define('DB_USER', '4WSCPbQrZ9Fd23S.root'); // تم التحديث من صورتك
-define('DB_PASS', 'EPjvyg9ArdVm0ZA1');    // تم التحديث من صورتك
+define('DB_PASS', '8tXnP3JoV61OX7Df');    // تم التحديث من صورتك
 define('DB_NAME', 'github_sample'); 
 
 // =====================================
