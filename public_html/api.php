@@ -2559,7 +2559,7 @@ break; // <-- وهذه هي الـ break; المفقودة التي تم إضا�
             $new_device_token = bin2hex(random_bytes(32));
             $user_agent = $_SERVER['HTTP_USER_AGENT'] ?? 'Unknown';
             $pdo->prepare("INSERT INTO trusted_devices (user_id, device_token, user_agent) VALUES (?, ?, ?)")->execute([$new_merchant_id, $new_device_token, $user_agent]);
-            setcookie('device_token', $new_device_token, ['expires' => time() + (86400 * 365), 'path' => '/', 'domain' => '', 'secure' => true, 'httponly' => true, 'samesite' => 'None'
+            setcookie('device_token', $new_device_token, ['expires' => time() + (86400 * 365), 'path' => '/', 'domain' => '', 'secure' => true, 'httponly' => true, 'samesite' => 'None']);
 
             $initData = [
                 'details' => [
