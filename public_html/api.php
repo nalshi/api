@@ -35,79 +35,28 @@ function measure_performance($element_name, $callable) {
     return $result;
 }
 
-// إعدادات إظهار الأخطاء (للإنتاج: أوقف العرض وسجل في ملف)
+// =======================================================
+// ⭐ الترويسات الأمنية (Security Headers & CORS) - النسخة المرنة
+// =======================================================
+// إظهار الأخطاء مؤقتاً لتسهيل اكتشاف أي خلل في قاعدة البيانات
 ini_set('display_errors', 1);
 ini_set('log_errors', 1);
 error_reporting(E_ALL);
 
-// =======================================================
-// ⭐ الترويسات الأمنية (Security Headers & CORS & HTTPS)
-// =======================================================
+$origin = $_SERVER['HTTP_ORIGIN'] ?? '*';
+header("Access-Control-Allow-Origin: $origin");
+header("Access-Control-Allow-Methods: POST, GET, OPTIONS, PUT, DELETE");
+header("Access-Control-Allow-Headers: Content-Type, Authorization, X-CSRF-TOKEN, X-Requested-With");
+header("Access-Control-Allow-Credentials: true");
 header('Content-Type: application/json; charset=utf-8');
 header("Cache-Control: no-store, no-cache, must-revalidate, max-age=0");
 
-// 1. الجدار الناري الصارم: تحديد النطاقات المسموحة فقط (Zero-Resource Filter)
-$allowed_origins =[
-    'http://vay.rf.gd',       // استضافتك الحالية (بدون HTTPS)
-    'https://vay.rf.gd',      // استضافتك الحالية (مع HTTPS)
-    'https://nynn.pages.dev' // استضافة Netlify الخاصة بك (تأكد من الرابط)
-];
-
-// السماح لبيئة التطوير المحلية (Localhost) إذا كنت تبرمج على جهازك
-$allowed_origins[] = 'http://localhost';
-$allowed_origins[] = 'http://127.0.0.1';
-
-$request_origin = $_SERVER['HTTP_ORIGIN'] ?? $_SERVER['HTTP_REFERER'] ?? '';
-$matched_origin = '';
-
-// فحص مصدر الطلب
-if (!empty($request_origin)) {
-    foreach ($allowed_origins as $origin) {
-        if (strpos($request_origin, $origin) === 0) { // يطابق البداية
-            $matched_origin = $origin;
-            break;
-        }
-    }
-} else {
-    // إذا كان الطلب من نفس السيرفر (نفس النطاق) يتم قبوله
-    $matched_origin = (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on' ? "https" : "http") . "://" . $_SERVER['HTTP_HOST'];
-}
-
-// ⛔ القطع الفوري: إذا كان المصدر غير مصرح له، أنهِ العملية فوراً (استهلاك صفر للسيرفر)
-if (empty($matched_origin)) {
-    http_response_code(403);
-    die(json_encode(['status' => 'error', 'message' => 'Access Denied: Request from an unauthorized source.']));
-}
-
-// 2. السماح للطلبات الموثوقة فقط
-header("Access-Control-Allow-Origin: $matched_origin");
-header("Access-Control-Allow-Methods: POST, GET, OPTIONS");
-header("Access-Control-Allow-Headers: Content-Type, Authorization, X-CSRF-TOKEN");
-header("Access-Control-Allow-Credentials: true");
-
-// إنهاء الطلبات التمهيدية (Preflight) الخاصة بـ Netlify فوراً
+// إنهاء الطلبات التمهيدية (Preflight) بنجاح فوري
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     http_response_code(200);
     exit();
 }
 // =======================================================
-// 2. إجبار استخدام HTTPS (تفعيل التشفير)
-// =======================================================
-        // 2. إجبار استخدام HTTPS (تفعيل التشفير)
-        $protocol = (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on' || (isset($_SERVER['HTTP_X_FORWARDED_PROTO']) && $_SERVER['HTTP_X_FORWARDED_PROTO'] === 'https')) ? 'https' : 'http';
-        $host = $_SERVER['HTTP_HOST'] ?? '';
-
-        if ($protocol !== 'https' && strpos($host, 'localhost') === false && strpos($host, '127.0.0.1') === false) {
-    http_response_code(403);
-    echo json_encode(['status' => 'error', 'message' => 'يتطلب هذا الـ API اتصالاً آمناً (HTTPS).']);
-    exit();
-}
-
-header("X-Frame-Options: DENY"); 
-header("X-XSS-Protection: 1; mode=block"); 
-header("X-Content-Type-Options: nosniff"); 
-header("Strict-Transport-Security: max-age=31536000; includeSubDomains"); 
-header("Content-Security-Policy: default-src 'none';"); 
 // =======================================================
 
 // =======================================================
