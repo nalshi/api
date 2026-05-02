@@ -35,28 +35,80 @@ function measure_performance($element_name, $callable) {
     return $result;
 }
 
-// =======================================================
-// ⭐ الترويسات الأمنية (Security Headers & CORS) - النسخة المرنة
-// =======================================================
-// إظهار الأخطاء مؤقتاً لتسهيل اكتشاف أي خلل في قاعدة البيانات
-ini_set('display_errors', 1);
+// إعدادات إظهار الأخطاء (للإنتاج: أوقف العرض وسجل في ملف)
+ini_set('display_errors', 0);
 ini_set('log_errors', 1);
 error_reporting(E_ALL);
 
-$origin = $_SERVER['HTTP_ORIGIN'] ?? '*';
-header("Access-Control-Allow-Origin: $origin");
-header("Access-Control-Allow-Methods: POST, GET, OPTIONS, PUT, DELETE");
-header("Access-Control-Allow-Headers: Content-Type, Authorization, X-CSRF-TOKEN, X-Requested-With");
-header("Access-Control-Allow-Credentials: true");
+// =======================================================
+// ⭐ الترويسات الأمنية (Security Headers & CORS & HTTPS)
+// =======================================================
 header('Content-Type: application/json; charset=utf-8');
 header("Cache-Control: no-store, no-cache, must-revalidate, max-age=0");
 
-// إنهاء الطلبات التمهيدية (Preflight) بنجاح فوري
-if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
+// 1. الجدار الناري الصارم: تحديد النطاقات المسموحة فقط (Zero-Resource Filter)
+$allowed_origins =[
+    'http://vay.rf.gd',       // استضافتك الحالية (بدون HTTPS)
+    'https://vay.rf.gd',      // استضافتك الحالية (مع HTTPS)
+    'https://nynn.pages.dev' // استضافة Netlify الخاصة بك (تأكد من الرابط)
+];
+
+// السماح لبيئة التطوير المحلية (Localhost) إذا كنت تبرمج على جهازك
+$allowed_origins[] = 'http://localhost';
+$allowed_origins[] = 'http://127.0.0.1';
+
+$request_origin = $_SERVER['HTTP_ORIGIN'] ?? $_SERVER['HTTP_REFERER'] ?? '';
+$matched_origin = '';
+
+// فحص مصدر الطلب
+if (!empty($request_origin)) {
+    foreach ($allowed_origins as $origin) {
+        if (strpos($request_origin, $origin) === 0) { // يطابق البداية
+            $matched_origin = $origin;
+            break;
+        }
+    }
+} else {
+    // إذا كان الطلب من نفس السيرفر (نفس النطاق) يتم قبوله
+    $matched_origin = (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on' ? "https" : "http") . "://" . $_SERVER['HTTP_HOST'];
+}
+
+// ⛔ القطع الفوري: إذا كان المصدر غير مصرح له، أنهِ العملية فوراً (استهلاك صفر للسيرفر)
+if (empty($matched_origin)) {
+    http_response_code(403);
+    die(json_encode(['status' => 'error', 'message' => 'Access Denied: Request from an unauthorized source.']));
+}
+
+// 2. السماح للطلبات الموثوقة فقط
+// السماح للمتصفح بالوصول من نطاقات مختلفة
+header("Access-Control-Allow-Origin: https://nynn.pages.dev"); // رابط موقعك على Cloudflare
+header("Access-Control-Allow-Methods: POST, GET, OPTIONS");
+header("Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With, X-CSRF-TOKEN");
+header("Access-Control-Allow-Credentials: true");
+
+// التعامل مع طلبات OPTIONS (Preflight) التي يرسلها المتصفح للتأكد من الأمان
+if ($_SERVER['REQUEST_METHOD'] == 'OPTIONS') {
     http_response_code(200);
     exit();
 }
 // =======================================================
+// 2. إجبار استخدام HTTPS (تفعيل التشفير)
+// =======================================================
+        // 2. إجبار استخدام HTTPS (تفعيل التشفير)
+        $protocol = (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on' || (isset($_SERVER['HTTP_X_FORWARDED_PROTO']) && $_SERVER['HTTP_X_FORWARDED_PROTO'] === 'https')) ? 'https' : 'http';
+        $host = $_SERVER['HTTP_HOST'] ?? '';
+
+        if ($protocol !== 'https' && strpos($host, 'localhost') === false && strpos($host, '127.0.0.1') === false) {
+    http_response_code(403);
+    echo json_encode(['status' => 'error', 'message' => 'يتطلب هذا الـ API اتصالاً آمناً (HTTPS).']);
+    exit();
+}
+
+header("X-Frame-Options: DENY"); 
+header("X-XSS-Protection: 1; mode=block"); 
+header("X-Content-Type-Options: nosniff"); 
+header("Strict-Transport-Security: max-age=31536000; includeSubDomains"); 
+header("Content-Security-Policy: default-src 'none';"); 
 // =======================================================
 
 // =======================================================
@@ -664,7 +716,7 @@ try {
     $exempted_actions =[
         // مسارات الشركاء
         'login', 'check_phone', 'verify_new_device_otp', 'resend_device_otp', 'select_role', 
-        'register_init', 'register_verify', 'recover_init', 'recover_check_otp', 'recover_set_password',
+        'register_init', 'register_verify', 'recover_init', 'recover_check_otp', 'recover_set_password','check_store_updates', 'check_customer_session' // أضف هؤلاء هنا
         
         // مسارات العملاء
         'get_initial_data', 'check_store_updates', 'get_public_products', 'public_search_products', 
@@ -692,6 +744,9 @@ try {
         if (!$auth_header && isset($input['auth_token'])) {
             $auth_header = 'Bearer ' . $input['auth_token'];
         }
+if (!$auth_header && isset($_REQUEST['auth_token'])) {
+    $auth_header = 'Bearer ' . $_REQUEST['auth_token'];
+}        
 
         if (!$auth_header) {
             send_response('error',['message' => 'تم حظر التوكن من قبل الاستضافة'], 401);
@@ -1306,7 +1361,7 @@ case 'get_initial_data':
                 'attempts' => 0
             ];
             $state_token = generate_signed_token($token_payload, 5);
-            setcookie('state_token', $state_token, ['expires' => time() + 300, 'path' => '/', 'domain' => '', 'secure' => true, 'httponly' => true, 'samesite' => 'None']);
+            setcookie('state_token', $state_token, time() + 300, '/', '', $is_secure_cookie, true);
             
             $pdo->prepare("INSERT INTO rate_limits (ip_address, phone_number) VALUES (?, ?)")->execute([$ip_address, $phone]);
 
@@ -1452,9 +1507,9 @@ break; // <-- وهذه هي الـ break; المفقودة التي تم إضا�
                     'expires' => time() - 3600,
                     'path' => '/',
                     'domain' => '',
-                    'secure' => true,
+                    'secure' => $is_secure_cookie,
                     'httponly' => true,
-                    'samesite' => 'None'
+                    'samesite' => 'Strict'
                 ]);
             }
             unset($_SESSION['customer_id'], $_SESSION['customer_name']);
@@ -2266,7 +2321,7 @@ break; // <-- وهذه هي الـ break; المفقودة التي تم إضا�
                 
                 $token_payload =[ 'purpose' => 'new_device_login', 'phone' => $phone_to_check, 'valid_logins' => $valid_logins, 'otp' => $otp, 'attempts' => 0 ];
                 $state_token = generate_signed_token($token_payload, 5);
-                setcookie('state_token', $state_token, ['expires' => time() + 300, 'path' => '/', 'domain' => '', 'secure' => true, 'httponly' => true, 'samesite' => 'None']);
+                setcookie('state_token', $state_token, time() + 300, '/', '', $is_secure_cookie, true);
                 
                 $message = "رمز التحقق لتسجيل الدخول من جهاز جديد هو: {$otp}";
                 // ⭐ مسح الأكواد القديمة
@@ -2344,7 +2399,9 @@ break; // <-- وهذه هي الـ break; المفقودة التي تم إضا�
                 'expires' => time() + (86400 * 365), 
                 'path' => '/',
                 'domain' => '',
-               'secure' => true, 'httponly' => true, 'samesite' => 'None'
+                'secure' => $is_secure_cookie,
+                'httponly' => true,
+                'samesite' => 'Strict'
             ]);
             
             setcookie('state_token', '', time() - 3600, '/'); 
@@ -2508,7 +2565,7 @@ break; // <-- وهذه هي الـ break; المفقودة التي تم إضا�
             $new_device_token = bin2hex(random_bytes(32));
             $user_agent = $_SERVER['HTTP_USER_AGENT'] ?? 'Unknown';
             $pdo->prepare("INSERT INTO trusted_devices (user_id, device_token, user_agent) VALUES (?, ?, ?)")->execute([$new_merchant_id, $new_device_token, $user_agent]);
-            setcookie('device_token', $new_device_token, ['expires' => time() + (86400 * 365), 'path' => '/', 'domain' => '', 'secure' => true, 'httponly' => true, 'samesite' => 'None']);
+            setcookie('device_token', $new_device_token, ['expires' => time() + (86400 * 365), 'path' => '/', 'domain' => '', 'secure' => $is_secure_cookie, 'httponly' => true, 'samesite' => 'Strict']);
 
             $initData = [
                 'details' => [
@@ -2868,7 +2925,7 @@ break; // <-- وهذه هي الـ break; المفقودة التي تم إضا�
                 $new_device_token = bin2hex(random_bytes(32));
                 $user_agent = $_SERVER['HTTP_USER_AGENT'] ?? 'Unknown';
                 $pdo->prepare("INSERT INTO trusted_devices (user_id, device_token, user_agent) VALUES (?, ?, ?)")->execute([$recovered_uid, $new_device_token, $user_agent]);
-                setcookie('device_token', $new_device_token, ['expires' => time() + (86400 * 365), 'path' => '/', 'domain' => '', 'secure' => true, 'httponly' => true, 'samesite' => 'None']);
+                setcookie('device_token', $new_device_token, ['expires' => time() + (86400 * 365), 'path' => '/', 'domain' => '', 'secure' => $is_secure_cookie, 'httponly' => true, 'samesite' => 'Strict']);
             }
             
             setcookie('state_token', '', time() - 3600, '/'); 
@@ -2885,7 +2942,9 @@ break; // <-- وهذه هي الـ break; المفقودة التي تم إضا�
                     'expires' => time() - 3600,
                     'path' => '/',
                     'domain' => '',
-                   'secure' => true, 'httponly' => true, 'samesite' => 'None'
+                    'secure' => $is_secure_cookie,
+                    'httponly' => true,
+                    'samesite' => 'Strict'
                 ]);
             }
             
@@ -2946,7 +3005,9 @@ break; // <-- وهذه هي الـ break; المفقودة التي تم إضا�
                         'expires' => time() - 3600,
                         'path' => '/',
                         'domain' => '',
-                       'secure' => true, 'httponly' => true, 'samesite' => 'None'
+                        'secure' => $is_secure_cookie,
+                        'httponly' => true,
+                        'samesite' => 'Strict'
                     ]);
                     session_destroy();
                     send_response('success',['message' => 'تم إلغاء الثقة بالجهاز الحالي بنجاح. سيتم تسجيل خروجك الآن.', 'force_logout' => true]);
