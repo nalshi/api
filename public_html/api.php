@@ -35,7 +35,7 @@ function measure_performance($element_name, $callable) {
 }
 
 // إعدادات إظهار الأخطاء (للإنتاج: أوقف العرض وسجل في ملف)
-ini_set('display_errors', 1);
+ini_set('display_errors', 0);
 ini_set('log_errors', 1);
 error_reporting(E_ALL);
 
