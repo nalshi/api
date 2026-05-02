@@ -103,4 +103,3 @@ function initialize_database($pdo) {
     // تم إيقاف التنفيذ التلقائي لأن الجداول موجودة بالفعل (كما ظهر في الفحص)
     return true;
 }
-?>
