@@ -29,7 +29,7 @@ echo "<h1><i class='fas fa-database'></i> بدء عملية تثبيت قاعد�
 try {
     // --- 1. Connect to the Database ---
     echo "<div class='log'>محاولة الاتصال بقاعدة البيانات...</div>";
-    require_once __DIR__ . '/../includes/nalsh-user-admin-name.php';
+    require_once __DIR__ . '/nalsh-user-admin-name.php';
 
     if (!$pdo) {
         throw new Exception("فشل الاتصال بقاعدة البيانات. يرجى التحقق من بيانات الاعتماد في 'nalsh-user-admin-name.php'.");
