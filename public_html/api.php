@@ -708,7 +708,7 @@ function sync_smart_store_structure($pdo, $merchant_id) {
 // 3. الاتصال بقاعدة البيانات ومعالجة الطلب
 // =======================================================
 try {
-        require_once __DIR__ . '/nalsh-user-admin-name.php';
+        require_once __DIR__ . '/../includes/nalsh-user-admin-name.php';
     // ==========================================
     // ⭐ الإصلاح الجذري: قراءة المدخلات في البداية
     // ==========================================
