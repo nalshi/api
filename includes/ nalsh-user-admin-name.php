@@ -15,7 +15,7 @@ if (session_status() === PHP_SESSION_NONE) {
 define('DB_HOST', 'gateway01.eu-central-1.prod.aws.tidbcloud.com'); 
 define('DB_PORT', '4000'); 
 define('DB_USER', '4WSCPbQrZ9Fd23S.root');
-define('DB_PASS', '974rEXwOuyX4n5I11'); // <--- كلمة المرور الجديدة التي ظهرت لك
+define('DB_PASS', '974rEXwOuyX4n5I1'); // <--- كلمة المرور الجديدة التي ظهرت لك
 define('DB_NAME', 'github_sample');
 
 // 3. إعدادات التطبيق والمفاتيح السرية
