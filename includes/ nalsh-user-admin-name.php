@@ -1,3 +1,4 @@
+
 <?php
 // =================================================================
 // ملف الاتصال بقاعدة البيانات وإعدادات النظام الأساسية (نسخة TiDB Cloud)
@@ -13,7 +14,7 @@ if (session_status() === PHP_SESSION_NONE) {
 
 // 2. إعدادات قاعدة البيانات TiDB Cloud (تم التحديث من الصورة)
 define('DB_HOST', 'gateway01.eu-central-1.prod.aws.tidbcloud.com'); 
-define('DB_PORT', '4000'); 
+define('DB_PORT', '4000'); // المنفذ الخاص بـ TiDB
 define('DB_USER', '4WSCPbQrZ9Fd23S.root');
 define('DB_PASS', '8HRcCIBDA9d2YikO');
 define('DB_NAME', 'github_sample');
@@ -60,6 +61,7 @@ try {
         PDO::MYSQL_ATTR_INIT_COMMAND => "SET NAMES utf8mb4",
     ];
     
+    // ✅ تم التأكد من وجود الفاصلة "," هنا. هذا هو السطر الذي سبب المشكلة على الأغلب
     $pdo = new PDO($dsn, DB_USER, DB_PASS, $options);
 
 } catch (PDOException $e) {
@@ -88,3 +90,4 @@ function initialize_database($pdo) {
     // هنا يمكن إضافة كود إنشاء الجداول إذا لزم الأمر
     return true;
 }
+?>
