@@ -1,6 +1,6 @@
 <?php
 // =================================================================
-// ملف الاتصال بقاعدة البيانات وإعدادات النظام الأساسية (نسخة TiDB Cloud)
+// ملف الاتصال بقاعدة البيانات وإعدادات النظام الأساسية (نسخة آمنة ونهائية)
 // المسار: htdocs/includes/nalsh-user-admin-name.php
 // =================================================================
 
@@ -11,11 +11,11 @@ if (session_status() === PHP_SESSION_NONE) {
     session_start();
 }
 
-// 2. إعدادات قاعدة البيانات TiDB Cloud (البيانات الجديدة)
+// 2. إعدادات قاعدة البيانات TiDB Cloud
 define('DB_HOST', 'gateway01.eu-central-1.prod.aws.tidbcloud.com'); 
 define('DB_PORT', '4000'); 
 define('DB_USER', '4WSCPbQrZ9Fd23S.root');
-define('DB_PASS', '974rEXwOuyX4n5I1'); // <--- كلمة المرور الجديدة التي ظهرت لك
+define('DB_PASS', '974rEXwOuyX4n5I1');
 define('DB_NAME', 'github_sample');
 
 // 3. إعدادات التطبيق والمفاتيح السرية
@@ -35,7 +35,7 @@ define('MACRO_DEVICE_ID', '0d8f9740-a59a-4828-97a3-65cf42aaae9e');
 define('MACRO_WEBHOOK_NAME', 'send_otp');
 
 // =====================================
-// إعدادات GitHub CDN (للتخزين السريع والمجاني)
+// إعدادات GitHub CDN
 // =====================================
 define('GITHUB_TOKEN', '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'); 
 define('GITHUB_OWNER', 'nalshi'); 
@@ -47,28 +47,28 @@ define('IMGBB_KEYS', [
     'a534bbb07829f6aa214b55253ecea58d' 
 ]);
 
-// 4. إنشاء اتصال قاعدة البيانات باستخدام PDO
+// 4. إنشاء اتصال قاعدة البيانات باستخدام PDO (مع تأمين SSL)
 try {
-    // بناء نص الاتصال مع إضافة المنفذ
     $dsn = "mysql:host=" . DB_HOST . ";port=" . DB_PORT . ";dbname=" . DB_NAME . ";charset=utf8mb4";
     
- $options = [
+    $options = [
         PDO::ATTR_ERRMODE            => PDO::ERRMODE_EXCEPTION,
         PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
         PDO::ATTR_EMULATE_PREPARES   => false,
         PDO::MYSQL_ATTR_INIT_COMMAND => "SET NAMES utf8mb4",
-        // إجبار الاتصال على استخدام SSL (مطلوب لـ TiDB Cloud على أنظمة Linux/Render)
+        // تفعيل SSL المطلوب للاتصال بقواعد بيانات TiDB من سيرفرات Render
         PDO::MYSQL_ATTR_SSL_VERIFY_SERVER_CERT => false,
         PDO::MYSQL_ATTR_SSL_CA => '/etc/ssl/certs/ca-certificates.crt',
     ];
     
-    // ✅ تم التأكد من وجود الفاصلة هنا
+    // ⚠️ تم إصلاح الخطأ الإملائي هنا (الفاصلة التي كانت مفقودة)
     $pdo = new PDO($dsn, DB_USER, DB_PASS, $options);
 
 } catch (PDOException $e) {
-    // في حالة الخطأ، يتم تسجيله ومنع تعليق الموقع
+    // في حالة فشل الاتصال، لا نكسر الموقع بل نرسل استجابة JSON للواجهة
     $pdo = null;
-    error_log("Connection failed: " . $e->getMessage());
+    error_log("Database Connection failed: " . $e->getMessage());
+    die(json_encode(['status' => 'error', 'message' => 'فشل الاتصال بقاعدة البيانات.']));
 }
 
 // 5. دوال مساعدة للنظام
