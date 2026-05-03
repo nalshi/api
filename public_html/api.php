@@ -38,58 +38,63 @@ function measure_performance($element_name, $callable) {
 ini_set('display_errors', 0);
 ini_set('log_errors', 1);
 error_reporting(E_ALL);
-
 // =======================================================
 // ⭐ الترويسات الأمنية (Security Headers & CORS & HTTPS)
 // =======================================================
 header('Content-Type: application/json; charset=utf-8');
 header("Cache-Control: no-store, no-cache, must-revalidate, max-age=0");
 
-// 1. الجدار الناري الصارم: تحديد النطاقات المسموحة فقط (Zero-Resource Filter)
-$allowed_origins =[
-    'http://vay.rf.gd',       // استضافتك الحالية (بدون HTTPS)
-    'https://vay.rf.gd',      // استضافتك الحالية (مع HTTPS)
-    'https://nynn.pages.dev' // استضافة Netlify الخاصة بك (تأكد من الرابط)
+// 1. الجدار الناري الصارم: تحديد النطاقات المسموحة فقط
+$allowed_origins = [
+    'http://vay.rf.gd',
+    'https://vay.rf.gd',
+    'https://nynn.pages.dev',
+    'https://api-ylin.onrender.com', // السماح لسيرفر Render نفسه
+    'http://localhost',
+    'http://127.0.0.1'
 ];
 
-// السماح لبيئة التطوير المحلية (Localhost) إذا كنت تبرمج على جهازك
-$allowed_origins[] = 'http://localhost';
-$allowed_origins[] = 'http://127.0.0.1';
+$request_origin = $_SERVER['HTTP_ORIGIN'] ?? '';
 
-$request_origin = $_SERVER['HTTP_ORIGIN'] ?? $_SERVER['HTTP_REFERER'] ?? '';
+// استخراج النطاق من الـ Referer إذا كان الـ Origin فارغاً
+if (empty($request_origin) && isset($_SERVER['HTTP_REFERER'])) {
+    $parsed = parse_url($_SERVER['HTTP_REFERER']);
+    if (isset($parsed['scheme']) && isset($parsed['host'])) {
+        $request_origin = $parsed['scheme'] . '://' . $parsed['host'];
+    }
+}
+
 $matched_origin = '';
 
-// فحص مصدر الطلب
 if (!empty($request_origin)) {
     foreach ($allowed_origins as $origin) {
-        if (strpos($request_origin, $origin) === 0) { // يطابق البداية
-            $matched_origin = $origin;
+        if (strpos($request_origin, $origin) === 0) {
+            $matched_origin = $request_origin;
             break;
         }
     }
 } else {
-    // إذا كان الطلب من نفس السيرفر (نفس النطاق) يتم قبوله
-    $matched_origin = (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on' ? "https" : "http") . "://" . $_SERVER['HTTP_HOST'];
+    // إذا كان الوصول مباشراً عبر المتصفح
+    $matched_origin = (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on' ? "https" : "http") . "://" . ($_SERVER['HTTP_HOST'] ?? '');
 }
 
-// ⛔ القطع الفوري: إذا كان المصدر غير مصرح له، أنهِ العملية فوراً (استهلاك صفر للسيرفر)
 if (empty($matched_origin)) {
     http_response_code(403);
     die(json_encode(['status' => 'error', 'message' => 'Access Denied: Request from an unauthorized source.']));
 }
 
-// 2. السماح للطلبات الموثوقة فقط
-// السماح للمتصفح بالوصول من نطاقات مختلفة
-header("Access-Control-Allow-Origin: https://nynn.pages.dev"); // رابط موقعك على Cloudflare
+// 2. السماح للطلبات الموثوقة فقط (ديناميكياً)
+header("Access-Control-Allow-Origin: $matched_origin");
 header("Access-Control-Allow-Methods: POST, GET, OPTIONS");
 header("Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With, X-CSRF-TOKEN");
 header("Access-Control-Allow-Credentials: true");
 
-// التعامل مع طلبات OPTIONS (Preflight) التي يرسلها المتصفح للتأكد من الأمان
+// التعامل مع طلبات OPTIONS (Preflight)
 if ($_SERVER['REQUEST_METHOD'] == 'OPTIONS') {
     http_response_code(200);
     exit();
 }
+
 // =======================================================
 // 2. إجبار استخدام HTTPS (تفعيل التشفير)
 // =======================================================
