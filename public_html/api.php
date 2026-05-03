@@ -124,7 +124,7 @@ define('OTP_COOLDOWN_SECONDS', 120);
 define('DELIVERY_AGENT_MAX_ORDERS', 5);
 define('ORDER_ACCEPT_TIMEOUT_SECONDS', 1800); 
 
-define('APP_SECRET_KEY', 'Nalsh_Secure_App_State_Key_2026_!@#$99'); 
+
 
 define('ALLOWED_DELIVERY_CENTER_LAT', 15.3694); 
 define('ALLOWED_DELIVERY_CENTER_LNG', 44.1910);
@@ -491,7 +491,10 @@ register_shutdown_function(function() {
     if ($error && ($error['type'] === E_ERROR || $error['type'] === E_PARSE)) {
         if (ob_get_length()) ob_clean();
         http_response_code(500); 
-        echo json_encode(['status' => 'error', 'message' => 'حدث خطأ داخلي في الخادم. يرجى المحاولة لاحقاً.']);
+        echo json_encode([
+            'status' => 'error', 
+            'message' => 'عطل فادح: ' . $error['message'] . ' في السطر ' . $error['line']
+        ], JSON_UNESCAPED_UNICODE);
     }
 });
 
@@ -799,87 +802,7 @@ if (!$auth_header && isset($_REQUEST['auth_token'])) {
         $is_secure_cookie = false;
     }
     
-    // التحقق من الجداول وبنائها إذا لم تكن موجودة
-    try { $pdo->exec("ALTER TABLE `users` ADD COLUMN `store_type` VARCHAR(100) NULL DEFAULT NULL COMMENT 'e.g., restaurant, mall, grocery' AFTER `settings`;"); } catch (PDOException $e) {}
-    try { $pdo->exec("ALTER TABLE users ADD COLUMN account_status ENUM('pending', 'approved', 'rejected') DEFAULT 'approved' AFTER is_active"); } catch (PDOException $e) {}
-    try {
-        $pdo->exec("CREATE TABLE IF NOT EXISTS `merchant_listings` (
-            `id` INT AUTO_INCREMENT PRIMARY KEY,
-            `merchant_id` INT NOT NULL,
-            `global_product_id` VARCHAR(255) NOT NULL,
-            `merchant_price` DECIMAL(10, 2) NOT NULL,
-            `cost_price` DECIMAL(10, 2) NOT NULL DEFAULT 0.00,
-            `quantity` INT(11) NOT NULL DEFAULT 0,
-            `quantity_type` ENUM('tracked', 'unlimited') NOT NULL DEFAULT 'tracked',
-            `is_available` TINYINT(1) NOT NULL DEFAULT 1,
-            `price_variables` JSON NULL,
-            `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            `updated_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-            INDEX (`merchant_id`),
-            INDEX (`global_product_id`),
-            UNIQUE KEY `merchant_product_unique` (`merchant_id`, `global_product_id`)
-        ) ENGINE=InnoDB;");
-    } catch (PDOException $e) {}
     
-try { $pdo->exec("ALTER TABLE `products` ADD COLUMN `currency` VARCHAR(10) NOT NULL DEFAULT 'YER' AFTER `price`;"); } catch (PDOException $e) {}
-    try { $pdo->exec("ALTER TABLE `merchant_listings` ADD COLUMN `currency` VARCHAR(10) NOT NULL DEFAULT 'YER' AFTER `merchant_price`;"); } catch (PDOException $e) {}
-    try { $pdo->exec("ALTER TABLE `products` ADD COLUMN `base_price` DECIMAL(10, 2) NOT NULL DEFAULT 0.00 AFTER `price`;"); } catch (PDOException $e) {}
-    try { $pdo->exec("ALTER TABLE orders ADD COLUMN cancel_reason TEXT NULL AFTER status"); } catch (PDOException $e) {}
-    try { $pdo->exec("ALTER TABLE products ADD COLUMN approval_status ENUM('pending', 'approved', 'rejected') DEFAULT 'approved' AFTER isAvailable"); } catch (PDOException $e) {}
-    try { $pdo->exec("ALTER TABLE users ADD COLUMN employer_id INT NULL DEFAULT NULL AFTER role"); } catch (PDOException $e) {}
-    
-    try {
-        $pdo->exec("CREATE TABLE IF NOT EXISTS `merchant_agent_links` (
-            `id` INT AUTO_INCREMENT PRIMARY KEY,
-            `merchant_id` INT NOT NULL,
-            `agent_id` INT NOT NULL,
-            `status` ENUM('pending', 'accepted', 'rejected') DEFAULT 'pending',
-            `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            `updated_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-            UNIQUE KEY `unique_link` (`merchant_id`, `agent_id`),
-            INDEX (`agent_id`),
-            INDEX (`merchant_id`)
-        ) ENGINE=InnoDB;");
-    } catch (PDOException $e) {}
-
-    try { $pdo->exec("ALTER TABLE orders ADD COLUMN exclusive_until DATETIME NULL AFTER accepted_at"); } catch (PDOException $e) {}
-    try { $pdo->exec("ALTER TABLE orders ADD COLUMN exclusive_agent_id INT NULL AFTER exclusive_until"); } catch (PDOException $e) {}
-    try { $pdo->exec("ALTER TABLE orders ADD COLUMN dispatch_queue TEXT NULL AFTER exclusive_agent_id"); } catch (PDOException $e) {}
-    // إنشاء جداول نظام التذاكر الذكية (Shadow Tickets)
-    // إنشاء جداول نظام التذاكر الذكية (Shadow Tickets)
-    try {
-        $pdo->exec("CREATE TABLE IF NOT EXISTS `live_tickets` (
-            `ticket_id` VARCHAR(50) PRIMARY KEY,
-            `order_group_id` VARCHAR(50) NOT NULL,
-            `merchant_id` INT NOT NULL,
-            `delivery_agent_id` INT NULL,
-            `customer_id` INT NOT NULL,
-            `status` VARCHAR(50) NOT NULL DEFAULT 'pending_delivery_acceptance',
-            `delivery_code` VARCHAR(10) NULL,
-            `ticket_data` LONGTEXT NOT NULL,
-            `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            `updated_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-            INDEX (`merchant_id`), INDEX (`delivery_agent_id`), INDEX (`customer_id`), INDEX (`status`)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;");
-
-        $pdo->exec("CREATE TABLE IF NOT EXISTS `orders_archive` (
-            `id` INT AUTO_INCREMENT PRIMARY KEY,
-            `ticket_id` VARCHAR(50),
-            `customer_id` INT,
-            `merchant_id` INT,
-            `final_status` VARCHAR(50),
-            `total_amount` DECIMAL(10,2),
-            `archived_data` LONGTEXT,
-            `archived_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;");
-    } catch (PDOException $e) { error_log("Failed to create ticket tables: " . $e->getMessage()); }
-
-    // إضافة ترقيع إجباري في حال كانت الجداول موجودة مسبقاً بشكل خاطئ
-    try { $pdo->exec("ALTER TABLE `live_tickets` ADD COLUMN `delivery_code` VARCHAR(10) NULL AFTER `status`"); } catch (Exception $e) {}
-    try { $pdo->exec("ALTER TABLE `live_tickets` ADD COLUMN `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP"); } catch (Exception $e) {}
-    try { $pdo->exec("ALTER TABLE `live_tickets` ADD COLUMN `updated_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"); } catch (Exception $e) {}
-    try { $pdo->exec("ALTER TABLE `live_tickets` MODIFY COLUMN `ticket_data` LONGTEXT NOT NULL"); } catch (Exception $e) {}
-    try { $pdo->exec("ALTER TABLE `orders_archive` MODIFY COLUMN `archived_data` LONGTEXT"); } catch (Exception $e) {}
 
     // =======================================================
     // ⭐ إدارة الجلسات الصارمة
@@ -4732,7 +4655,7 @@ case 'save_merchant_settings':
     error_log("Database Error in API: " . $e->getMessage());
     // قمنا بتفعيل إظهار الخطأ الحقيقي بدلاً من الرسالة العامة
     send_response('error',['message' => 'DB Error: ' . $e->getMessage()], 500);
-} catch (Exception $e) {
+} catch (Throwable $e) {
     $msg = $e->getMessage();
     if (strpos($msg, 'SQLSTATE') !== false || strpos($msg, 'PDO') !== false || strpos($msg, '/') !== false || strpos($msg, '\\') !== false || strpos($msg, 'on line') !== false) {
         error_log("System Error in API: " . $msg);
