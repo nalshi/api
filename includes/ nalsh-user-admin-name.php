@@ -11,11 +11,11 @@ if (session_status() === PHP_SESSION_NONE) {
     session_start();
 }
 
-// 2. إعدادات قاعدة البيانات TiDB Cloud (تم التحديث من الصورة)
+// 2. إعدادات قاعدة البيانات TiDB Cloud (البيانات الجديدة)
 define('DB_HOST', 'gateway01.eu-central-1.prod.aws.tidbcloud.com'); 
-define('DB_PORT', '4000'); // المنفذ الخاص بـ TiDB
+define('DB_PORT', '4000'); 
 define('DB_USER', '4WSCPbQrZ9Fd23S.root');
-define('DB_PASS', '8HRcCIBDA9d2YikO');
+define('DB_PASS', '974rEXwOuyX4n5I1'); // <--- كلمة المرور الجديدة التي ظهرت لك
 define('DB_NAME', 'github_sample');
 
 // 3. إعدادات التطبيق والمفاتيح السرية
@@ -56,19 +56,17 @@ try {
         PDO::ATTR_ERRMODE            => PDO::ERRMODE_EXCEPTION,
         PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
         PDO::ATTR_EMULATE_PREPARES   => false,
-        // TiDB Cloud يتطلب اتصالاً آمناً في بعض الأحيان، هذا السطر يضمن التوافق
+        // TiDB Cloud يتطلب اتصالاً آمناً
         PDO::MYSQL_ATTR_INIT_COMMAND => "SET NAMES utf8mb4",
     ];
     
-    // ✅ تم إصلاح الخطأ هنا بإضافة الفاصلة "," بين DB_USER و DB_PASS
+    // ✅ تم التأكد من وجود الفاصلة هنا
     $pdo = new PDO($dsn, DB_USER, DB_PASS, $options);
 
 } catch (PDOException $e) {
     // في حالة الخطأ، يتم تسجيله ومنع تعليق الموقع
     $pdo = null;
     error_log("Connection failed: " . $e->getMessage());
-    // سطر للتصحيح أثناء الرفع على Render (يمكنك إغلاقه لاحقاً)
-    // die("خطأ في الاتصال: " . $e->getMessage()); 
 }
 
 // 5. دوال مساعدة للنظام
@@ -83,10 +81,8 @@ function require_login() {
     }
 }
 
-// دالة تهيئة الجداول (يمكن استدعاؤها يدوياً إذا كانت القاعدة فارغة)
 function initialize_database($pdo) {
     if (!$pdo) return false;
-    // هنا يمكن إضافة كود إنشاء الجداول إذا لزم الأمر
     return true;
 }
 ?>
