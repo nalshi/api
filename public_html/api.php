@@ -708,7 +708,14 @@ function sync_smart_store_structure($pdo, $merchant_id) {
 // 3. الاتصال بقاعدة البيانات ومعالجة الطلب
 // =======================================================
 try {
-        require_once dirname(__DIR__) . '/includes/nalsh-user-admin-name.php';
+        // كود فحص المجلدات
+$parent_dir = dirname(__DIR__);
+if (!is_dir($parent_dir . '/includes')) {
+    die("خطأ: مجلد includes غير موجود أصلاً في السيرفر! المسار الحالي: " . $parent_dir);
+}
+if (!file_exists($parent_dir . '/includes/nalsh-user-admin-name.php')) {
+    die("خطأ: المجلد موجود، لكن ملف الإعدادات غير موجود بداخله! الملفات الموجودة هي: " . implode(', ', scandir($parent_dir . '/includes')));
+}
     // ==========================================
     // ⭐ الإصلاح الجذري: قراءة المدخلات في البداية
     // ==========================================
