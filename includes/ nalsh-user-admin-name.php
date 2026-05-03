@@ -87,4 +87,3 @@ function initialize_database($pdo) {
     if (!$pdo) return false;
     return true;
 }
-?>
