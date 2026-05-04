@@ -4,7 +4,7 @@
 // سريع جداً، لا يستهلك المعالج، ونفس أمان لوحة التاجر 100%
 // =================================================================
 
-require_once __DIR__ . '/../includes/nalsh-user-admin-name.php';
+require_once __DIR__ . '/nalsh-user-admin-name.php';
 
 header('Content-Type: application/json; charset=utf-8');
 header("Cache-Control: no-store, no-cache, must-revalidate, max-age=0");
