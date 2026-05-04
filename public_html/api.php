@@ -709,7 +709,7 @@ function sync_smart_store_structure($pdo, $merchant_id) {
 // =======================================================
 try {
         // كود فحص المجلدات
-require_once (__DIR__) . '/nalsh-user-admin-name.php';
+require_once dirname(__DIR__) . '/nalsh-user-admin-name.php';
     // ==========================================
     // ⭐ الإصلاح الجذري: قراءة المدخلات في البداية
     // ==========================================
@@ -788,13 +788,20 @@ if (!$auth_header && isset($_REQUEST['auth_token'])) {
         send_response('error', ['message' => 'Token expired'], 401);
     }
     
-    // تم التحقق بنجاح! الآن يمكننا استخدام بيانات المستخدم بأمان
-    $user_id = $payload['user_id'];
-    $user_role = $payload['role'];
-    $_SESSION['user_id'] = $payload['user_id']; // للحفاظ على التوافقية مع بعض الدوال القديمة
-    $_SESSION['role'] = $payload['role'];
-    $_SESSION['store_name'] = $payload['store_name'];
-    $_SESSION['username'] = $payload['username'];
+    // تم التحقق بنجاح!
+    if (isset($payload['role']) && $payload['role'] === 'customer') {
+        // إذا كان التوكن خاص بعميل
+        $customer_id = $payload['customer_id'];
+        $_SESSION['customer_id'] = $customer_id; 
+    } else {
+        // إذا كان التوكن خاص بتاجر أو مندوب
+        $user_id = $payload['user_id'] ?? null;
+        $user_role = $payload['role'] ?? null;
+        $_SESSION['user_id'] = $user_id; 
+        $_SESSION['role'] = $user_role;
+        $_SESSION['store_name'] = $payload['store_name'] ?? '';
+        $_SESSION['username'] = $payload['username'] ?? '';
+    }
 }
 
 // ... (باقي الملف يبدأ من switch ($action))
@@ -1380,7 +1387,24 @@ case 'auth_request_otp':
                     ]);
                 } catch (PDOException $token_error) {}
                 
-                send_response('success',['message' => 'تم تسجيل الدخول بنجاح!', 'customer' =>['full_name' => $cust['full_name'], 'phone' => $phone], 'needs_profile_update' => $is_new_user]);
+// إنشاء توكن للعميل
+                $payload_token = [
+                    'customer_id' => $cust['id'],
+                    'customer_name' => $cust['full_name'],
+                    'role' => 'customer',
+                    'exp' => time() + (86400 * 30) // صالح لمدة 30 يوم
+                ];
+                $header_encoded = base64_encode(json_encode(['alg' => 'HS256', 'typ' => 'JWT']));
+                $payload_encoded = base64_encode(json_encode($payload_token));
+                $signature = hash_hmac('sha256', "$header_encoded.$payload_encoded", APP_SECRET_KEY, true);
+                $customer_jwt_token = "$header_encoded.$payload_encoded." . base64_encode($signature);
+
+                send_response('success',[
+                    'message' => 'تم تسجيل الدخول بنجاح!', 
+                    'token' => $customer_jwt_token, // إرسال التوكن للواجهة
+                    'customer' => ['full_name' => $cust['full_name'], 'phone' => $phone], 
+                    'needs_profile_update' => $is_new_user
+                ]);                
             } else {
                 $payload['attempts']++;
                 if ($payload['attempts'] >= 3) {
