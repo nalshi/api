@@ -4734,26 +4734,20 @@ case 'save_merchant_settings':
             throw new Exception('الإجراء المطلوب غير معروف: ' . sanitize_input($action));
     }
 
-} catch (PDOException $e) {
-    error_log("Database Error in API: " . $e->getMessage());
-    // قمنا بتفعيل إظهار الخطأ الحقيقي بدلاً من الرسالة العامة
-    send_response('error',['message' => 'DB Error: ' . $e->getMessage()], 500);
 } catch (Throwable $e) {
+    // ⭐ كشف الخطأ الحقيقي بدون أي إخفاء
     $msg = $e->getMessage();
-    if (strpos($msg, 'SQLSTATE') !== false || strpos($msg, 'PDO') !== false || strpos($msg, '/') !== false || strpos($msg, '\\') !== false || strpos($msg, 'on line') !== false) {
-        error_log("System Error in API: " . $msg);
-        $msg = 'حدث خطأ غير متوقع. يرجى المحاولة لاحقاً.';
-        $code = 500;
-    } else {
-        $code = (strpos($msg, 'تغيرت الجلسة') !== false || strpos($msg, 'غير مصرح') !== false || strpos($msg, 'يجب تسجيل الدخول') !== false) ? 401 : 400;
-    }
+    $line = $e->getLine();
     
-    // إذا كان الخطأ متعلقاً بضرورة تحديث الملف الشخصي نرسله كود 403 ليتم التعامل معه بالفرونت اند
     if (strpos($msg, 'REQUIRE_PROFILE_UPDATE:') !== false) {
         $code = 403;
         $msg = str_replace('REQUIRE_PROFILE_UPDATE:', '', $msg);
+    } else {
+        $code = 500;
+        // هنا سيظهر لك الخطأ الفعلي (مثل اسم الجدول الناقص أو المشكلة في قاعدة البيانات)
+        $msg = "تفاصيل الخطأ: " . $msg . " (في السطر: " . $line . ")";
     }
     
-    send_response('error',['message' => trim($msg)], $code);
+    send_response('error', ['message' => trim($msg)], $code);
 }
 ?>
