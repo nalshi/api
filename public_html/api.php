@@ -709,8 +709,7 @@ function sync_smart_store_structure($pdo, $merchant_id) {
 // =======================================================
 try {
         // كود فحص المجلدات
-// إذا كان الملف في نفس المجلد
-require_once __DIR__ . '/nalsh-user-admin-name.php';
+require_once dirname(__DIR__) . '/includes/nalsh.php';
     // ==========================================
     // ⭐ الإصلاح الجذري: قراءة المدخلات في البداية
     // ==========================================
@@ -1153,7 +1152,8 @@ case 'get_initial_data':
             send_response('success',['data' => $listings]);
             break;
 
-        case 'auth_request_otp':
+        
+case 'auth_request_otp':
             // =======================================================
             // ⭐ بوابة تحدي النقر الذكي (Smart Tap Challenge)
             // =======================================================
@@ -1299,7 +1299,16 @@ case 'get_initial_data':
                 'attempts' => 0
             ];
             $state_token = generate_signed_token($token_payload, 5);
-            setcookie('state_token', $state_token, time() + 300, '/', '', $is_secure_cookie, true);
+            
+            // ⭐ التعديل الصارم للكوكيز Cross-Site
+            setcookie('state_token', $state_token, [
+                'expires' => time() + 300,
+                'path' => '/',
+                'domain' => '',
+                'secure' => true,
+                'httponly' => true,
+                'samesite' => 'None'
+            ]);
             
             $pdo->prepare("INSERT INTO rate_limits (ip_address, phone_number) VALUES (?, ?)")->execute([$ip_address, $phone]);
 
@@ -1331,55 +1340,74 @@ case 'get_initial_data':
 
             if ($stmt_update->rowCount() > 0 || $otp_input == $payload['otp']) {
     
-    $pdo->prepare("UPDATE customers SET otp_code = NULL, is_verified = 1 WHERE id = ?")->execute([$cust['id']]);
+                $pdo->prepare("UPDATE customers SET otp_code = NULL, is_verified = 1 WHERE id = ?")->execute([$cust['id']]);
 
-    $is_new_user = (strpos($cust['full_name'], 'عميل') === 0);
+                $is_new_user = (strpos($cust['full_name'], 'عميل') === 0);
 
-    // ================== ⭐ بداية الإصلاح ⭐ ==================
-    
-    // 1. تجديد الجلسة لمنع اختطافها وضمان حفظها فوراً
-    session_regenerate_id(true); 
+                // 1. تجديد الجلسة لمنع اختطافها وضمان حفظها فوراً
+                session_regenerate_id(true); 
 
-    // تم إزالة دوال الجلسة المعقدة لضمان استقرار الدخول في الاستضافات المجانية
-    $_SESSION['customer_id'] = $cust['id'];
-    $_SESSION['customer_name'] = $cust['full_name'];
-    $_SESSION['loggedin'] = true;
-    // 2. إغلاق الجلسة فوراً لضمان حفظ البيانات قبل الرد
-    session_write_close();
-    
-    // ================== ⭐ نهاية الإصلاح ⭐ ==================
-    
-    setcookie('state_token', '', time() - 3600, '/');
+                $_SESSION['customer_id'] = $cust['id'];
+                $_SESSION['customer_name'] = $cust['full_name'];
+                $_SESSION['loggedin'] = true;
+                // 2. إغلاق الجلسة فوراً لضمان حفظ البيانات قبل الرد
+                session_write_close();
+                
+                // ⭐ مسح الكوكي بـ SameSite=None
+                setcookie('state_token', '', [
+                    'expires' => time() - 3600,
+                    'path' => '/',
+                    'domain' => '',
+                    'secure' => true,
+                    'httponly' => true,
+                    'samesite' => 'None'
+                ]);
 
-    try {
-        $pdo->prepare("DELETE FROM auth_tokens WHERE user_id = ?")->execute([$cust['id']]);
-        $selector = bin2hex(random_bytes(16)); $validator = bin2hex(random_bytes(32)); $hashed_validator = hash('sha256', $validator);
-        $expires = date('Y-m-d H:i:s', time() + (86400 * 60)); 
-        $pdo->prepare("INSERT INTO auth_tokens (selector, hashed_validator, user_id, expires) VALUES (?, ?, ?, ?)")->execute([$selector, $hashed_validator, $cust['id'], $expires]);
-        
-        setcookie('remember_me_customer', $selector . ':' . $validator,[
-            'expires' => time() + (86400 * 60),
-            'path' => '/',
-            'domain' => '',
-            'secure' => $is_secure_cookie, // الاعتماد على متغير الأمان الموجود مسبقاً
-            'httponly' => true,
-            'samesite' => 'Lax' // لمنع المتصفح من حظره في اتصالات HTTP
-        ]);
-    } catch (PDOException $token_error) {}
-    
-    send_response('success',['message' => 'تم تسجيل الدخول بنجاح!', 'customer' =>['full_name' => $cust['full_name'], 'phone' => $phone], 'needs_profile_update' => $is_new_user]);
-} else {
-    $payload['attempts']++;
-    if ($payload['attempts'] >= 3) {
-        $pdo->prepare("UPDATE customers SET otp_code = NULL WHERE id = ?")->execute([$cust['id']]);
-        setcookie('state_token', '', time() - 3600, '/');
-        throw new Exception("لقد تجاوزت حد المحاولات الخاطئة (3 محاولات). يرجى طلب كود جديد.");
-    }
-    $new_token = generate_signed_token($payload, 5);
-    setcookie('state_token', $new_token, time() + 300, '/', '', $is_secure_cookie, true);
-    throw new Exception('كود التحقق خاطئ. تبقى لك ' . (3 - $payload['attempts']) . ' محاولات.');
-}
-break; // <-- وهذه هي الـ break; المفقودة التي تم إضافتها في الحل السابق
+                try {
+                    $pdo->prepare("DELETE FROM auth_tokens WHERE user_id = ?")->execute([$cust['id']]);
+                    $selector = bin2hex(random_bytes(16)); $validator = bin2hex(random_bytes(32)); $hashed_validator = hash('sha256', $validator);
+                    $expires = date('Y-m-d H:i:s', time() + (86400 * 60)); 
+                    $pdo->prepare("INSERT INTO auth_tokens (selector, hashed_validator, user_id, expires) VALUES (?, ?, ?, ?)")->execute([$selector, $hashed_validator, $cust['id'], $expires]);
+                    
+                    // ⭐ التعديل الصارم لـ Remember Me
+                    setcookie('remember_me_customer', $selector . ':' . $validator,[
+                        'expires' => time() + (86400 * 60),
+                        'path' => '/',
+                        'domain' => '',
+                        'secure' => true, 
+                        'httponly' => true,
+                        'samesite' => 'None' 
+                    ]);
+                } catch (PDOException $token_error) {}
+                
+                send_response('success',['message' => 'تم تسجيل الدخول بنجاح!', 'customer' =>['full_name' => $cust['full_name'], 'phone' => $phone], 'needs_profile_update' => $is_new_user]);
+            } else {
+                $payload['attempts']++;
+                if ($payload['attempts'] >= 3) {
+                    $pdo->prepare("UPDATE customers SET otp_code = NULL WHERE id = ?")->execute([$cust['id']]);
+                    // ⭐ مسح الكوكي
+                    setcookie('state_token', '', [
+                        'expires' => time() - 3600,
+                        'path' => '/',
+                        'secure' => true,
+                        'httponly' => true,
+                        'samesite' => 'None'
+                    ]);
+                    throw new Exception("لقد تجاوزت حد المحاولات الخاطئة (3 محاولات). يرجى طلب كود جديد.");
+                }
+                $new_token = generate_signed_token($payload, 5);
+                // ⭐ تحديث الكوكي
+                setcookie('state_token', $new_token, [
+                    'expires' => time() + 300,
+                    'path' => '/',
+                    'secure' => true,
+                    'httponly' => true,
+                    'samesite' => 'None'
+                ]);
+                throw new Exception('كود التحقق خاطئ. تبقى لك ' . (3 - $payload['attempts']) . ' محاولات.');
+            }
+            break;
+
         case 'check_customer_session':
             if ($customer_id) {
                 $stmt = $pdo->prepare("SELECT full_name, phone, address, is_verified FROM customers WHERE id = ?");
@@ -1389,7 +1417,10 @@ break; // <-- وهذه هي الـ break; المفقودة التي تم إضا�
                 if ($customer_data) {
                     $is_new_user = (strpos($customer_data['full_name'], 'عميل') === 0);
                     send_response('success',['loggedIn' => true, 'customer' => $customer_data, 'requires_otp' => false, 'needs_profile_update' => $is_new_user]);
-                }else { unset($_SESSION['customer_id'], $_SESSION['customer_name']); send_response('success',['loggedIn' => false]); }
+                } else { 
+                    unset($_SESSION['customer_id'], $_SESSION['customer_name']); 
+                    send_response('success',['loggedIn' => false]); 
+                }
             } else {
                 $token = $_COOKIE['state_token'] ?? '';
                 $pending_phone = null;
@@ -1398,7 +1429,14 @@ break; // <-- وهذه هي الـ break; المفقودة التي تم إضا�
                         $payload = verify_signed_token($token, 'customer_login');
                         $pending_phone = $payload['phone'];
                     } catch (Exception $e) {
-                        setcookie('state_token', '', time() - 3600, '/');
+                        // ⭐ مسح الكوكي
+                        setcookie('state_token', '', [
+                            'expires' => time() - 3600,
+                            'path' => '/',
+                            'secure' => true,
+                            'httponly' => true,
+                            'samesite' => 'None'
+                        ]);
                     }
                 }
 
@@ -1415,6 +1453,7 @@ break; // <-- وهذه هي الـ break; المفقودة التي تم إضا�
                 } else { send_response('success',['loggedIn' => false]); }
             }
             break;
+        
             
         case 'update_customer_profile':
             if (!$customer_id) throw new Exception("يرجى تسجيل الدخول");
@@ -1437,41 +1476,7 @@ break; // <-- وهذه هي الـ break; المفقودة التي تم إضا�
             send_response('success',['message' => 'تم حفظ بياناتك بنجاح. يمكنك الآن إتمام طلباتك.']);
             break;
 
-       case 'logout':
-            if (!$user_id) send_response('error',['message' => 'غير مصرح'], 401);
-
-            // تم إيقاف مسح جهاز المستخدم من قاعدة البيانات والكوكي للاحتفاظ بتسجيل الدخول التلقائي
-            /*
-            if (isset($_COOKIE['device_token'])) {
-                $device_token = $_COOKIE['device_token'];
-                $pdo->prepare("DELETE FROM trusted_devices WHERE user_id = ? AND device_token = ?")->execute([$user_id, $device_token]);
-                setcookie('device_token', '',[
-                    'expires' => time() - 3600,
-                    'path' => '/',
-                    'domain' => '',
-                    'secure' => $is_secure_cookie,
-                    'httponly' => true,
-                    'samesite' => 'Strict'
-                ]);
-            }
-            */
-            
-            // ⭐ الحل الذكي: حذف بيانات التاجر/المندوب فقط لإنهاء الجلسة
-            unset($_SESSION['user_id'], $_SESSION['username'], $_SESSION['store_name'], $_SESSION['role']);
-            
-            // لا ندمر الجلسة بالكامل إلا إذا كان حساب العميل غير موجود أيضاً
-            if (empty($_SESSION['customer_id'])) {
-                $_SESSION =[];
-                if (ini_get("session.use_cookies")) {
-                    $params = session_get_cookie_params();
-                    setcookie(session_name(), '',['expires' => time() - 42000, 'path' => $params["path"], 'domain' => $params["domain"], 'secure' => $params["secure"], 'httponly' => $params["httponly"], 'samesite' => 'Strict']);
-                }
-                session_destroy();
-            }
-            
-            send_response('success',['message' => 'تم تسجيل الخروج بنجاح.']);
-            break; 
-
+       
         case 'get_user_data':
             if (!$customer_id) send_response('error',['message' => 'غير مسجل دخول'], 401);
             $sql = "SELECT c.id, c.product_id, c.size_id, c.quantity, p.name, p.price, p.discount, p.image, p.sizes FROM user_cart c JOIN products p ON c.product_id = p.id WHERE c.customer_id = ?";
@@ -2217,8 +2222,45 @@ case 'get_orders':
                 send_response('multiple_users_found',['accounts' => $accounts_by_role]);
             }
             break;
+                                    
+        case 'select_role':
+            $user_id_to_login = $input['user_id'] ?? null;
+            $allowed_accounts = $_SESSION['login_selection_data'] ??[];
+            $user_to_login = null;
+
+            foreach($allowed_accounts as $role_data){
+                if($role_data['id'] == $user_id_to_login){
+                    $user_to_login = $role_data;
+                    break;
+                }
+            }
+            if (!$user_to_login) throw new Exception("طلب غير صالح.");
+
+            $stmt = $pdo->prepare("SELECT id, username, store_name, role, is_active FROM users WHERE id = ?");
+            $stmt->execute([$user_id_to_login]);
+            $user = $stmt->fetch(PDO::FETCH_ASSOC);
         
-        case 'login':
+            if (!$user || !$user['is_active']) throw new Exception("الحساب غير موجود أو غير نشط.");
+        
+            $_SESSION['user_id'] = $user['id'];
+            $_SESSION['username'] = $user['username'];
+            $_SESSION['store_name'] = $user['store_name'];
+            $_SESSION['loggedin'] = true;
+          $_SESSION['role'] = $user['role'];
+            $_SESSION['device_token'] = $_COOKIE['device_token'] ?? '';
+            unset($_SESSION['login_selection_data']);
+            
+            // إنشاء التوكن
+            $payload = ['user_id' => $user['id'], 'username' => $user['username'], 'store_name' => $user['store_name'], 'role' => $user['role'], 'exp' => time() + (60 * 60 * 8)];
+            $header_encoded = base64_encode(json_encode(['alg' => 'HS256', 'typ' => 'JWT']));
+            $payload_encoded = base64_encode(json_encode($payload));
+            $signature = hash_hmac('sha256', "$header_encoded.$payload_encoded", APP_SECRET_KEY, true);
+            $token = "$header_encoded.$payload_encoded." . base64_encode($signature);
+            
+            $redirect = ($user['role'] === 'merchant') ? 'merchant-dashboard.php' : 'delivery-dashboard.php';
+            send_response('success',['token' => $token, 'redirect' => $redirect]);
+            break;
+case 'login':
             try { $pdo->exec("ALTER TABLE users ADD COLUMN failed_login_attempts INT DEFAULT 0 AFTER password"); } catch (Exception $e) {}
             try { $pdo->exec("ALTER TABLE users ADD COLUMN lockout_until DATETIME NULL AFTER failed_login_attempts"); } catch (Exception $e) {}
 
@@ -2315,10 +2357,18 @@ case 'get_orders':
                 
                 $token_payload =[ 'purpose' => 'new_device_login', 'phone' => $phone_to_check, 'valid_logins' => $valid_logins, 'otp' => $otp, 'attempts' => 0 ];
                 $state_token = generate_signed_token($token_payload, 5);
-                setcookie('state_token', $state_token, time() + 300, '/', '', $is_secure_cookie, true);
+                
+                // ⭐ التعديل للكوكي
+                setcookie('state_token', $state_token, [
+                    'expires' => time() + 300,
+                    'path' => '/',
+                    'domain' => '',
+                    'secure' => true,
+                    'httponly' => true,
+                    'samesite' => 'None'
+                ]);
                 
                 $message = "رمز التحقق لتسجيل الدخول من جهاز جديد هو: {$otp}";
-                // ⭐ مسح الأكواد القديمة
                 try { 
                     $pdo->prepare("DELETE FROM sms_queue WHERE phone_number = ?")->execute([$phone_to_check]);
                     $pdo->prepare("INSERT INTO sms_queue (phone_number, message) VALUES (?, ?)")->execute([$phone_to_check, $message]); 
@@ -2372,11 +2422,23 @@ case 'get_orders':
             if ($otp_input != $payload['otp']) {
                 $payload['attempts']++;
                 if ($payload['attempts'] >= 3) {
-                    setcookie('state_token', '', time() - 3600, '/');
+                    setcookie('state_token', '', [
+                        'expires' => time() - 3600,
+                        'path' => '/',
+                        'secure' => true,
+                        'httponly' => true,
+                        'samesite' => 'None'
+                    ]);
                     throw new Exception("تم إلغاء العملية لتجاوز عدد المحاولات (3 محاولات). يرجى تسجيل الدخول من جديد.");
                 }
                 $new_token = generate_signed_token($payload, 5);
-                setcookie('state_token', $new_token, time() + 300, '/', '', $is_secure_cookie, true);
+                setcookie('state_token', $new_token, [
+                    'expires' => time() + 300,
+                    'path' => '/',
+                    'secure' => true,
+                    'httponly' => true,
+                    'samesite' => 'None'
+                ]);
                 throw new Exception('رمز التحقق غير صحيح. تبقى لك ' . (3 - $payload['attempts']) . ' محاولات.');
             }
             
@@ -2389,16 +2451,23 @@ case 'get_orders':
                 $stmt_insert->execute([$account_to_trust['id'], $new_device_token, $user_agent]);
             }
             
+            // ⭐ تعديل كوكي جهاز التاجر/المندوب
             setcookie('device_token', $new_device_token,[
                 'expires' => time() + (86400 * 365), 
                 'path' => '/',
                 'domain' => '',
-                'secure' => $is_secure_cookie,
+                'secure' => true,
                 'httponly' => true,
-                'samesite' => 'Strict'
+                'samesite' => 'None'
             ]);
             
-            setcookie('state_token', '', time() - 3600, '/'); 
+            setcookie('state_token', '', [
+                'expires' => time() - 3600,
+                'path' => '/',
+                'secure' => true,
+                'httponly' => true,
+                'samesite' => 'None'
+            ]); 
             
             if (count($valid_logins) === 1) {
                 $user = $valid_logins[0];
@@ -2416,7 +2485,7 @@ case 'get_orders':
                 $signature = hash_hmac('sha256', "$header_encoded.$payload_encoded", APP_SECRET_KEY, true);
                 $token = "$header_encoded.$payload_encoded." . base64_encode($signature);
                 
-                $redirect = ($user['role'] === 'merchant') ? 'merchant-dashboard.php' : 'delivery-dashboard.php';
+                $redirect = ($user['role'] === 'merchant') ? 'merchant-dashboard.html' : 'delivery-dashboard.html';
                 send_response('success',['token' => $token, 'redirect' => $redirect]);
             } else {
                 $selection_data =[];
@@ -2430,45 +2499,7 @@ case 'get_orders':
                 send_response('role_selection_required',['accounts' => $selection_data]);
             }
             break;
-        
-        case 'select_role':
-            $user_id_to_login = $input['user_id'] ?? null;
-            $allowed_accounts = $_SESSION['login_selection_data'] ??[];
-            $user_to_login = null;
 
-            foreach($allowed_accounts as $role_data){
-                if($role_data['id'] == $user_id_to_login){
-                    $user_to_login = $role_data;
-                    break;
-                }
-            }
-            if (!$user_to_login) throw new Exception("طلب غير صالح.");
-
-            $stmt = $pdo->prepare("SELECT id, username, store_name, role, is_active FROM users WHERE id = ?");
-            $stmt->execute([$user_id_to_login]);
-            $user = $stmt->fetch(PDO::FETCH_ASSOC);
-        
-            if (!$user || !$user['is_active']) throw new Exception("الحساب غير موجود أو غير نشط.");
-        
-            $_SESSION['user_id'] = $user['id'];
-            $_SESSION['username'] = $user['username'];
-            $_SESSION['store_name'] = $user['store_name'];
-            $_SESSION['loggedin'] = true;
-          $_SESSION['role'] = $user['role'];
-            $_SESSION['device_token'] = $_COOKIE['device_token'] ?? '';
-            unset($_SESSION['login_selection_data']);
-            
-            // إنشاء التوكن
-            $payload = ['user_id' => $user['id'], 'username' => $user['username'], 'store_name' => $user['store_name'], 'role' => $user['role'], 'exp' => time() + (60 * 60 * 8)];
-            $header_encoded = base64_encode(json_encode(['alg' => 'HS256', 'typ' => 'JWT']));
-            $payload_encoded = base64_encode(json_encode($payload));
-            $signature = hash_hmac('sha256', "$header_encoded.$payload_encoded", APP_SECRET_KEY, true);
-            $token = "$header_encoded.$payload_encoded." . base64_encode($signature);
-            
-            $redirect = ($user['role'] === 'merchant') ? 'merchant-dashboard.php' : 'delivery-dashboard.php';
-            send_response('success',['token' => $token, 'redirect' => $redirect]);
-            break;
-        
         case 'register_init':
             $allowed_fields = ['phone', 'role', 'name', 'username', 'password', 'location'];
             $safe_input = filter_allowed_keys($input, $allowed_fields);
@@ -2516,11 +2547,20 @@ case 'get_orders':
                 'attempts' => 0
             ];
             $state_token = generate_signed_token($token_payload, 10);
-            setcookie('state_token', $state_token, time() + 600, '/', '', $is_secure_cookie, true);
+            
+            // ⭐ التعديل الصارم
+            setcookie('state_token', $state_token, [
+                'expires' => time() + 600,
+                'path' => '/',
+                'domain' => '',
+                'secure' => true,
+                'httponly' => true,
+                'samesite' => 'None'
+            ]);
 
             $message = "كود تفعيل حساب الشريك الخاص بك هو: {$otp}";
             
-            // ⭐ مسح الأكواد القديمة لنفس الرقم ثم إدراج الجديد
+            // مسح الأكواد القديمة لنفس الرقم ثم إدراج الجديد
             $pdo->prepare("DELETE FROM sms_queue WHERE phone_number = ?")->execute([$phone]);
             $pdo->prepare("INSERT INTO sms_queue (phone_number, message) VALUES (?, ?)")->execute([$phone, $message]);
             
@@ -2540,11 +2580,23 @@ case 'get_orders':
             if ($otp != $payload['otp']) {
                 $payload['attempts']++;
                 if ($payload['attempts'] >= 3) {
-                    setcookie('state_token', '', time() - 3600, '/');
+                    setcookie('state_token', '', [
+                        'expires' => time() - 3600,
+                        'path' => '/',
+                        'secure' => true,
+                        'httponly' => true,
+                        'samesite' => 'None'
+                    ]);
                     throw new Exception("تم تجاوز المحاولات (3 محاولات). يرجى طلب كود جديد.");
                 }
                 $new_token = generate_signed_token($payload, 10);
-                setcookie('state_token', $new_token, time() + 600, '/', '', $is_secure_cookie, true);
+                setcookie('state_token', $new_token, [
+                    'expires' => time() + 600,
+                    'path' => '/',
+                    'secure' => true,
+                    'httponly' => true,
+                    'samesite' => 'None'
+                ]);
                 throw new Exception('رمز التحقق غير صحيح. تبقى لك ' . (3 - $payload['attempts']) . ' محاولات.');
             }
 
@@ -2559,7 +2611,16 @@ case 'get_orders':
             $new_device_token = bin2hex(random_bytes(32));
             $user_agent = $_SERVER['HTTP_USER_AGENT'] ?? 'Unknown';
             $pdo->prepare("INSERT INTO trusted_devices (user_id, device_token, user_agent) VALUES (?, ?, ?)")->execute([$new_merchant_id, $new_device_token, $user_agent]);
-            setcookie('device_token', $new_device_token, ['expires' => time() + (86400 * 365), 'path' => '/', 'domain' => '', 'secure' => $is_secure_cookie, 'httponly' => true, 'samesite' => 'Strict']);
+            
+            // ⭐ الكوكي للجهاز الجديد
+            setcookie('device_token', $new_device_token, [
+                'expires' => time() + (86400 * 365),
+                'path' => '/',
+                'domain' => '',
+                'secure' => true,
+                'httponly' => true,
+                'samesite' => 'None'
+            ]);
 
             $initData = [
                 'details' => [
@@ -2581,54 +2642,14 @@ case 'get_orders':
 
             flag_cache_for_rebuild($new_merchant_id);
             
-            setcookie('state_token', '', time() - 3600, '/'); 
+            setcookie('state_token', '', [
+                'expires' => time() - 3600,
+                'path' => '/',
+                'secure' => true,
+                'httponly' => true,
+                'samesite' => 'None'
+            ]); 
             send_response('success',['message' => 'تم تفعيل حسابك بنجاح! يمكنك الآن تسجيل الدخول.']);
-            break;
-            
-        case 'add_internal_role':
-            if (!$user_id || !in_array($user_role,['merchant', 'delivery'])) {
-                send_response('error',['message' => 'غير مصرح'], 401);
-            }
-            
-            $allowed_fields =['password', 'store_name', 'username'];
-            $safe_input = filter_allowed_keys($input, $allowed_fields);
-
-            $password = $safe_input['password'] ?? '';
-            $new_role = ($user_role === 'merchant') ? 'delivery' : 'merchant';
-            $new_name = sanitize_input($safe_input['store_name'] ?? '');
-            $new_username = sanitize_input($safe_input['username'] ?? '');
-            
-            if (!preg_match('/^[a-z][a-z0-9_.]{4,19}$/', $new_username)) {
-                throw new Exception("اسم المستخدم غير صالح. يجب أن يبدأ بحرف، ويحتوي على حروف إنجليزية صغيرة وأرقام فقط، وطوله بين 5 و 20 حرفاً.");
-            }
-            
-            $stmt_pass = $pdo->prepare("SELECT password, phone FROM users WHERE id = ?");
-            $stmt_pass->execute([$user_id]);
-            $current_user_data = $stmt_pass->fetch(PDO::FETCH_ASSOC);
-            
-            if (!$current_user_data || !password_verify($password, $current_user_data['password'])) {
-                throw new Exception("كلمة المرور الحالية غير صحيحة.");
-            }
-            
-            $phone = $current_user_data['phone'];
-            
-            $stmt_check_role = $pdo->prepare("SELECT id FROM users WHERE phone = ? AND role = ?");
-            $stmt_check_role->execute([$phone, $new_role]);
-            if ($stmt_check_role->fetch()) {
-                throw new Exception("لديك حساب بهذا الدور مسبقاً.");
-            }
-            
-            $stmt_check_username = $pdo->prepare("SELECT id FROM users WHERE username = ?");
-            $stmt_check_username->execute([$new_username]);
-            if ($stmt_check_username->fetch()) {
-                throw new Exception("اسم المستخدم هذا محجوز بالفعل. اختر اسماً آخر.");
-            }
-            
-            $hashed_pass = $current_user_data['password']; 
-            $stmt_insert = $pdo->prepare("INSERT INTO users (username, password, store_name, phone, role, is_active, settings) VALUES (?, ?, ?, ?, ?, 1, ?)");
-            $stmt_insert->execute([$new_username, $hashed_pass, $new_name, $phone, $new_role, '{"location": null}']);
-            
-            send_response('success',['message' => 'تم إنشاء الحساب الإضافي بنجاح! يمكنك التبديل بين حساباتك عند تسجيل الدخول القادم.']);
             break;
 
         case 'create_private_agent':
@@ -2820,9 +2841,8 @@ case 'get_orders':
             send_response('success',['data' => $stmt->fetchAll(PDO::FETCH_ASSOC)]);
             break;
 
-        // =======================================================
-        
-     case 'recover_init':
+        // =======================================================        
+ case 'recover_init':
             $phone = preg_replace('/[^0-9]/', '', $input['phone'] ?? '');
             try { $pdo->exec("ALTER TABLE users ADD COLUMN password_changed_at DATETIME NULL"); } catch (Exception $e) {}
             
@@ -2845,11 +2865,19 @@ case 'get_orders':
                 'attempts' => 0
             ];
             $state_token = generate_signed_token($token_payload, 10);
-            setcookie('state_token', $state_token, time() + 600, '/', '', $is_secure_cookie, true);
+            
+            // ⭐ تعديل كوكي الاستعادة
+            setcookie('state_token', $state_token, [
+                'expires' => time() + 600,
+                'path' => '/',
+                'domain' => '',
+                'secure' => true,
+                'httponly' => true,
+                'samesite' => 'None'
+            ]);
             
             $message = "كود استعادة كلمة المرور الخاص بك هو: {$otp}";
             
-            // ⭐ مسح الأكواد القديمة
             $pdo->prepare("DELETE FROM sms_queue WHERE phone_number = ?")->execute([$phone]);
             $pdo->prepare("INSERT INTO sms_queue (phone_number, message) VALUES (?, ?)")->execute([$phone, $message]);
             
@@ -2874,11 +2902,23 @@ case 'get_orders':
             if ($otp_input != $payload['otp']) {
                 $payload['attempts']++;
                 if ($payload['attempts'] >= 3) {
-                    setcookie('state_token', '', time() - 3600, '/');
+                    setcookie('state_token', '', [
+                        'expires' => time() - 3600,
+                        'path' => '/',
+                        'secure' => true,
+                        'httponly' => true,
+                        'samesite' => 'None'
+                    ]);
                     throw new Exception("تم تجاوز المحاولات (3 محاولات). يرجى طلب كود استعادة جديد.");
                 }
                 $new_token = generate_signed_token($payload, 10);
-                setcookie('state_token', $new_token, time() + 600, '/', '', $is_secure_cookie, true);
+                setcookie('state_token', $new_token, [
+                    'expires' => time() + 600,
+                    'path' => '/',
+                    'secure' => true,
+                    'httponly' => true,
+                    'samesite' => 'None'
+                ]);
                 throw new Exception('رمز التحقق غير صحيح. تبقى لك ' . (3 - $payload['attempts']) . ' محاولات.');
             }
 
@@ -2887,7 +2927,15 @@ case 'get_orders':
                 'phone' => $phone
             ];
             $reset_token = generate_signed_token($token_payload, 10);
-            setcookie('state_token', $reset_token, time() + 600, '/', '', $is_secure_cookie, true);
+            
+            setcookie('state_token', $reset_token, [
+                'expires' => time() + 600,
+                'path' => '/',
+                'domain' => '',
+                'secure' => true,
+                'httponly' => true,
+                'samesite' => 'None'
+            ]);
             
             send_response('success');
             break;
@@ -2919,38 +2967,65 @@ case 'get_orders':
                 $new_device_token = bin2hex(random_bytes(32));
                 $user_agent = $_SERVER['HTTP_USER_AGENT'] ?? 'Unknown';
                 $pdo->prepare("INSERT INTO trusted_devices (user_id, device_token, user_agent) VALUES (?, ?, ?)")->execute([$recovered_uid, $new_device_token, $user_agent]);
-                setcookie('device_token', $new_device_token, ['expires' => time() + (86400 * 365), 'path' => '/', 'domain' => '', 'secure' => $is_secure_cookie, 'httponly' => true, 'samesite' => 'Strict']);
-            }
-            
-            setcookie('state_token', '', time() - 3600, '/'); 
-            send_response('success');
-            break;
-        
-        case 'logout':
-            if (!$user_id) send_response('error',['message' => 'غير مصرح'], 401);
-
-            if (isset($_COOKIE['device_token'])) {
-                $device_token = $_COOKIE['device_token'];
-                $pdo->prepare("DELETE FROM trusted_devices WHERE user_id = ? AND device_token = ?")->execute([$user_id, $device_token]);
-                setcookie('device_token', '',[
-                    'expires' => time() - 3600,
+                
+                // ⭐ الكوكي للجهاز الآمن
+                setcookie('device_token', $new_device_token, [
+                    'expires' => time() + (86400 * 365),
                     'path' => '/',
                     'domain' => '',
-                    'secure' => $is_secure_cookie,
+                    'secure' => true,
                     'httponly' => true,
-                    'samesite' => 'Strict'
+                    'samesite' => 'None'
                 ]);
             }
             
-            // ⭐ الحل الذكي: حذف بيانات التاجر/المندوب فقط
-            unset($_SESSION['user_id'], $_SESSION['username'], $_SESSION['store_name'], $_SESSION['role'], $_SESSION['device_token']);
+            setcookie('state_token', '', [
+                'expires' => time() - 3600,
+                'path' => '/',
+                'secure' => true,
+                'httponly' => true,
+                'samesite' => 'None'
+            ]); 
+            send_response('success');
+            break;                          
+        case 'logout':
+            if (!$user_id) send_response('error',['message' => 'غير مصرح'], 401);
+
+            // تم إيقاف مسح جهاز المستخدم من قاعدة البيانات والكوكي للاحتفاظ بتسجيل الدخول التلقائي
+            /*
+            if (isset($_COOKIE['device_token'])) {
+                $device_token = $_COOKIE['device_token'];
+                $pdo->prepare("DELETE FROM trusted_devices WHERE user_id = ? AND device_token = ?")->execute([$user_id, $device_token]);
+                
+                // ⭐ طريقة الحذف الآمنة لـ Cross Site
+                setcookie('device_token', '', [
+                    'expires' => time() - 3600,
+                    'path' => '/',
+                    'domain' => '',
+                    'secure' => true,
+                    'httponly' => true,
+                    'samesite' => 'None'
+                ]);
+            }
+            */
+            
+            // ⭐ الحل الذكي: حذف بيانات التاجر/المندوب فقط لإنهاء الجلسة
+            unset($_SESSION['user_id'], $_SESSION['username'], $_SESSION['store_name'], $_SESSION['role']);
             
             // لا ندمر الجلسة بالكامل إلا إذا كان حساب العميل غير موجود أيضاً
             if (empty($_SESSION['customer_id'])) {
                 $_SESSION =[];
                 if (ini_get("session.use_cookies")) {
                     $params = session_get_cookie_params();
-                    setcookie(session_name(), '',['expires' => time() - 42000, 'path' => $params["path"], 'domain' => $params["domain"], 'secure' => $params["secure"], 'httponly' => $params["httponly"], 'samesite' => 'Strict']);
+                    // ⭐ التدمير الآمن للجلسة
+                    setcookie(session_name(), '', [
+                        'expires' => time() - 42000, 
+                        'path' => $params["path"], 
+                        'domain' => $params["domain"], 
+                        'secure' => true, 
+                        'httponly' => $params["httponly"], 
+                        'samesite' => 'None'
+                    ]);
                 }
                 session_destroy();
             }
