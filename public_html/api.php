@@ -709,7 +709,7 @@ function sync_smart_store_structure($pdo, $merchant_id) {
 // =======================================================
 try {
         // كود فحص المجلدات
-require_once dirname(__DIR__) . '/includes/nalsh.php';
+require_once dirname(__DIR__) . '/nalsh-user-admin-name.php';
     // ==========================================
     // ⭐ الإصلاح الجذري: قراءة المدخلات في البداية
     // ==========================================
