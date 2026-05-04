@@ -709,7 +709,7 @@ function sync_smart_store_structure($pdo, $merchant_id) {
 // =======================================================
 try {
         // كود فحص المجلدات
-require_once (__DIR__) . '/nalsh-user-admin-name.php';
+require_once dirname(__DIR__) . '/nalsh-user-admin-name.php';
     // ==========================================
     // ⭐ الإصلاح الجذري: قراءة المدخلات في البداية
     // ==========================================
@@ -1312,12 +1312,12 @@ case 'auth_request_otp':
             
             $pdo->prepare("INSERT INTO rate_limits (ip_address, phone_number) VALUES (?, ?)")->execute([$ip_address, $phone]);
 
-            send_response('success',['message' => 'تم إرسال كود التحقق بنجاح.', 'otp' => 'sent', 'phone' => $phone, 'cooldown' => OTP_COOLDOWN_SECONDS]);
+            send_response('success',['message' => 'تم إرسال كود التحقق بنجاح.', 'otp' => 'sent', 'phone' => $phone, 'cooldown' => OTP_COOLDOWN_SECONDS, 'state_token' => $state_token]);
             break;
 
         case 'auth_verify_otp':
             $otp_input = sanitize_input($input['otp'] ?? '');
-            $token = $_COOKIE['state_token'] ?? '';
+            $token = $input['state_token'] ?? $_COOKIE['state_token'] ?? '';
             
             try {
                 $payload = verify_signed_token($token, 'customer_login');
