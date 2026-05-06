@@ -19,7 +19,7 @@ if (session_status() === PHP_SESSION_NONE) {
 }
 
 // ========================================================================
-// 1. قارئ ملفات ENV (في حال تم رفع الملف النصي)
+// 1. قارئ ملفات ENV
 // ========================================================================
 $env_files = [__DIR__ . '/.env', __DIR__ . '/api.env.txt'];
 foreach ($env_files as $file) {
@@ -30,7 +30,6 @@ foreach ($env_files as $file) {
             if (strpos($line, '=') !== false) {
                 list($name, $value) = explode('=', $line, 2);
                 $name = trim($name);
-                // إزالة المسافات وعلامات التنصيص المزدوجة والمفردة
                 $value = trim($value, " \t\n\r\0\x0B\"'"); 
                 putenv(sprintf('%s=%s', $name, $value));
                 $_ENV[$name] = $value;
@@ -52,7 +51,7 @@ define('DB_HOST', get_env_value('DB_HOST'));
 define('DB_NAME', get_env_value('DB_NAME'));
 define('DB_USER', get_env_value('DB_USER'));
 define('DB_PASS', get_env_value('DB_PASS'));
-define('DB_PORT', get_env_value('DB_PORT', '4000')); // تم التعديل ليناسب TiDB
+define('DB_PORT', get_env_value('DB_PORT', '4000')); 
 
 define('APP_SECRET_KEY', get_env_value('APP_SECRET_KEY', 'nalsh_fallback_secret_9988'));
 define('FIREBASE_URL', get_env_value('FIREBASE_URL'));
@@ -71,19 +70,23 @@ if (empty($imgbb_array)) $imgbb_array = ['dummy_key'];
 define('IMGBB_KEYS', $imgbb_array);
 
 // ========================================================================
-// 3. الاتصال بقاعدة بيانات TiDB Cloud (آمن)
+// 3. الاتصال بقاعدة بيانات TiDB Cloud (تشفير SSL إجباري)
 // ========================================================================
 global $pdo;
 
 try {
     $dsn = "mysql:host=" . DB_HOST . ";port=" . DB_PORT . ";dbname=" . DB_NAME . ";charset=utf8mb4";
     
+    // مسار شهادات الأمان الافتراضي في سيرفرات Render و Linux
+    $ca_path = '/etc/ssl/certs/ca-certificates.crt';
+    
     $options = [
         PDO::ATTR_ERRMODE            => PDO::ERRMODE_EXCEPTION,
         PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
         PDO::ATTR_EMULATE_PREPARES   => false,
         PDO::MYSQL_ATTR_INIT_COMMAND => "SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci",
-        // إعدادات التوافق مع TiDB Cloud
+        // ⭐ إضافة إعدادات التشفير الإجبارية لـ TiDB ⭐
+        PDO::MYSQL_ATTR_SSL_CA       => $ca_path,
         PDO::MYSQL_ATTR_SSL_VERIFY_SERVER_CERT => false
     ];
     
@@ -93,7 +96,6 @@ try {
     error_log("TiDB Connection Error: " . $e->getMessage());
     header('Content-Type: application/json; charset=utf-8');
     http_response_code(500);
-    // إظهار الخطأ مؤقتاً لتتأكد من عمله، (قم بتغييرها لاحقاً لرسالة عامة)
     die(json_encode([
         'status' => 'error', 
         'message' => 'DB Error: ' . $e->getMessage()
