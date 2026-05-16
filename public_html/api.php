@@ -480,7 +480,7 @@ $exempted_actions = [
     'login', 'check_phone', 'register_init', 'register_verify',
     // ⭐ تمت إضافة أوامر بوابة الشركاء لتجاوز القفل:
     'select_role', 'verify_new_device_otp', 'resend_device_otp',
-    'recover_init', 'recover_check_otp', 'recover_set_password''build_cache_cron'
+    'recover_init', 'recover_check_otp', 'recover_set_password','build_cache_cron'
 ];
 // قراءة المدخلات
 $input = [];
