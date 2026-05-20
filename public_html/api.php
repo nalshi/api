@@ -193,6 +193,18 @@ function sync_to_firebase($merchant_username, $node, $item_id, $data, $method = 
 function get_firebase_secret_path($user_id, $username) {
     return md5($user_id . 'SUPER_SECRET_KEY_123' . $username);
 }
+// دالة لتسجيل علم إعادة بناء الكاش بصمت لمنع توقف النظام
+function flag_cache_for_rebuild($merchant_id = null) {
+    global $pdo;
+    if (!$pdo) return;
+    try {
+        // تحديث حقل في جدول الإعدادات يشير إلى وجود تحديثات معلقة
+        $stmt = $pdo->prepare("INSERT INTO settings (setting_key, setting_value) VALUES ('cache_rebuild_pending', '1') ON DUPLICATE KEY UPDATE setting_value = '1'");
+        $stmt->execute();
+    } catch (Exception $e) {
+        // التجاوز بصمت لضمان عدم تأثر تجربة المستخدم أو توقف التسجيل
+    }
+}
 function generate_signed_token($payload, $expiry_minutes = 5) {
     $header = json_encode(['typ' => 'JWT', 'alg' => 'HS256']);
     $payload['exp'] = time() + ($expiry_minutes * 60);
