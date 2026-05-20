@@ -568,33 +568,34 @@ if (!empty($auth_header)) {
         if (strcasecmp($type, 'Bearer') == 0 && !empty($token)) {
             $token_parts = explode('.', $token);
             if (count($token_parts) === 3) {
-    if (!defined('APP_SECRET_KEY')) define('APP_SECRET_KEY', 'nalsh_fallback_secret_9988');
-    list($header_enc, $payload_encoded, $signature_enc) = $token_parts;
-    $expected_sig = hash_hmac('sha256', "$header_enc.$payload_encoded", APP_SECRET_KEY, true);
-    
-    // التعديل السحري: دعم التشفير الآمن (Base64Url) لمنع تلف التوكن
-    $expected_sig_b64url = str_replace(['+', '/', '='], ['-', '_', ''], base64_encode($expected_sig));
-    
-    if (hash_equals($signature_enc, $expected_sig_b64url) || hash_equals(base64_decode($signature_enc), $expected_sig)) {
-        $b64_payload = str_replace(['-', '_'], ['+', '/'], $payload_encoded);
-        $payload = json_decode(base64_decode($b64_payload), true);
+                if (!defined('APP_SECRET_KEY')) define('APP_SECRET_KEY', 'nalsh_fallback_secret_9988');
+                list($header_enc, $payload_encoded, $signature_enc) = $token_parts;
+                $expected_sig = hash_hmac('sha256', "$header_enc.$payload_encoded", APP_SECRET_KEY, true);
+                
+                // التعديل السحري: دعم التشفير الآمن (Base64Url) لمنع تلف التوكن
+                $expected_sig_b64url = str_replace(['+', '/', '='], ['-', '_', ''], base64_encode($expected_sig));
+                
+                if (hash_equals($signature_enc, $expected_sig_b64url) || hash_equals(base64_decode($signature_enc), $expected_sig)) {
+                    $b64_payload = str_replace(['-', '_'], ['+', '/'], $payload_encoded);
+                    $payload = json_decode(base64_decode($b64_payload), true);
                     
-                   if ($payload && isset($payload['exp']) && $payload['exp'] > time()) {
-    // هنا يتم تثبيت الهوية
-    if (isset($payload['role']) && $payload['role'] === 'customer') {
-        $customer_id = $payload['customer_id'];
-        $_SESSION['customer_id'] = $customer_id;
-    } else {
-        $user_id = $payload['user_id'] ?? null;
-        $user_role = $payload['role'] ?? null;
-        $merchant_username = $payload['username'] ?? null; // تثبيت اسم المستخدم المستخرج من التوكن
-        $_SESSION['user_id'] = $user_id;
-        $_SESSION['role'] = $user_role;
-        if ($merchant_username) {
-            $_SESSION['username'] = $merchant_username;
-        }
-    }
-}
+                    if ($payload && isset($payload['exp']) && $payload['exp'] > time()) {
+                        // هنا يتم تثبيت الهوية
+                        if (isset($payload['role']) && $payload['role'] === 'customer') {
+                            $customer_id = $payload['customer_id'];
+                            $_SESSION['customer_id'] = $customer_id;
+                        } else {
+                            $user_id = $payload['user_id'] ?? null;
+                            $user_role = $payload['role'] ?? null;
+                            $merchant_username = $payload['username'] ?? null;
+                            $_SESSION['user_id'] = $user_id;
+                            $_SESSION['role'] = $user_role;
+                            if ($merchant_username) {
+                                $_SESSION['username'] = $merchant_username;
+                            }
+                        }
+                    }
+                }
             }
         }
     } catch (Exception $e) {
