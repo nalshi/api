@@ -338,12 +338,25 @@ function send_silent_push_to_merchant($merchant_fcm_token, $order_id) {
     $payload = [
         'message' => [
             'token' => $merchant_fcm_token,
-            // ⚠️ قمنا بحذف مفتاح 'notification' ونقلنا العنوان والرسالة إلى داخل 'data'
-            'data' => [
-                'action' => 'new_order',
-                'order_id' => (string)$order_id,
+            // 1. مفتاح notification يضمن ظهور الإشعار في الموبايل حتى لو المتصفح مغلق
+            'notification' => [
                 'title' => 'طلب جديد واصل الآن! 🛍️',
                 'body' => 'لديك طلب جديد بانتظار الموافقة.'
+            ],
+            // 2. مفتاح data لحمل البيانات الإضافية
+            'data' => [
+                'action' => 'new_order',
+                'order_id' => (string)$order_id
+            ],
+            // 3. مفتاح webpush يخبر المتصفح أن يفتح لوحة التاجر عند الضغط على الإشعار
+            'webpush' => [
+                'notification' => [
+                    'icon' => '/images/icons/icon-192x192.png',
+                    'vibrate' => [200, 100, 200, 100, 200]
+                ],
+                'fcm_options' => [
+                    'link' => '/merchant-dashboard.html' // هذا الرابط سيفتح تلقائياً عند النقر
+                ]
             ]
         ]
     ];
