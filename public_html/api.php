@@ -334,16 +334,16 @@ function send_silent_push_to_merchant($merchant_fcm_token, $order_id) {
     $access_token = get_fcm_access_token();
     if (!$access_token) return;
 
+    // داخل دالة send_silent_push_to_merchant
     $payload = [
         'message' => [
             'token' => $merchant_fcm_token,
-            'notification' => [
-                'title' => 'طلب جديد واصل الآن! 🛍️',
-                'body' => 'لديك طلب جديد بانتظار الموافقة.'
-            ],
+            // ⚠️ قمنا بحذف مفتاح 'notification' ونقلنا العنوان والرسالة إلى داخل 'data'
             'data' => [
                 'action' => 'new_order',
-                'order_id' => (string)$order_id
+                'order_id' => (string)$order_id,
+                'title' => 'طلب جديد واصل الآن! 🛍️',
+                'body' => 'لديك طلب جديد بانتظار الموافقة.'
             ]
         ]
     ];
