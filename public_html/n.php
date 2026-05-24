@@ -1,4 +1,4 @@
-Enter<?php
+<?php
 // إظهار الأخطاء
 ini_set('display_errors', 1);
 error_reporting(E_ALL);
@@ -6,7 +6,7 @@ error_reporting(E_ALL);
 header('Content-Type: text/plain; charset=utf-8');
 
 // ⚠️ 1. ضع التوكن الذي نسخته من الأداة الأولى هنا
-$device_token = "ضع_التوكن_الذي_نسخته_هنا";
+$device_token = "ciSfuG6qJOCnoQ8DJ2Xxia:APA91bEG0IyL_CSpX6CRFT_kFITX5lGO9AnP_cTfHziHKns8KtR7UJKqAk2FD7tE-vocn4G07Qmp6KzTAbVsySPXfXYeJyFwfA8ijcg7CXGmAHtVAwb6Tgg";
 
 echo "=== فحص إرسال الإشعارات عبر Firebase V1 API ===\n\n";
 
