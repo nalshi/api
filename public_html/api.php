@@ -278,10 +278,18 @@ function simple_php_hash($str) {
     return $hash;
 }
 function get_fcm_access_token() {
-    $key_path = __DIR__ . '/firebase-credentials.json';
-    if (!file_exists($key_path)) return null;
+    // محاولة قراءة المفتاح من متغيرات Render أولاً
+    $env_json = getenv('FIREBASE_CREDENTIALS_JSON') ?: $_ENV['FIREBASE_CREDENTIALS_JSON'] ?? '';
+    
+    if (!empty($env_json)) {
+        $key_data = json_decode($env_json, true);
+    } else {
+        // أو قراءته من الملف إذا كنت قد رفعته
+        $key_path = __DIR__ . '/firebase-credentials.json';
+        if (!file_exists($key_path)) return null;
+        $key_data = json_decode(file_get_contents($key_path), true);
+    }
 
-    $key_data = json_decode(file_get_contents($key_path), true);
     $header = json_encode(['alg' => 'RS256', 'typ' => 'JWT']);
     $now = time();
     $payload = json_encode([
@@ -310,12 +318,19 @@ function get_fcm_access_token() {
     return json_decode($response, true)['access_token'] ?? null;
 }
 
+// وتعديل بسيط في دالة الإرسال لتقبل هذا التغيير:
 function send_silent_push_to_merchant($merchant_fcm_token, $order_id) {
     if (empty($merchant_fcm_token)) return;
-    $key_path = __DIR__ . '/firebase-credentials.json';
-    if (!file_exists($key_path)) return;
     
-    $project_id = json_decode(file_get_contents($key_path), true)['project_id'];
+    $env_json = getenv('FIREBASE_CREDENTIALS_JSON') ?: $_ENV['FIREBASE_CREDENTIALS_JSON'] ?? '';
+    if (!empty($env_json)) {
+        $project_id = json_decode($env_json, true)['project_id'];
+    } else {
+        $key_path = __DIR__ . '/firebase-credentials.json';
+        if (!file_exists($key_path)) return;
+        $project_id = json_decode(file_get_contents($key_path), true)['project_id'];
+    }
+    
     $access_token = get_fcm_access_token();
     if (!$access_token) return;
 
