@@ -927,10 +927,12 @@ try { $pdo->exec("ALTER TABLE users ADD COLUMN fcm_token TEXT NULL AFTER phone")
         }
     }
 
-    if ($customer_id) {
+   if ($customer_id) {
         $stmt_check_cust = $pdo->prepare("SELECT is_active FROM customers WHERE id = ?");
         $stmt_check_cust->execute([$customer_id]);
-        if ($stmt_check_cust->fetchColumn() == 0) {
+        $isActiveStatus = $stmt_check_cust->fetchColumn();
+        // التعديل: نتأكد أنه تم العثور على نتيجة وأنها تساوي 0 حرفياً
+        if ($isActiveStatus !== false && (int)$isActiveStatus === 0) {
             session_unset(); session_destroy();
             setcookie('remember_me_customer', '', time() - 3600, '/');
             send_response('error',['message' => 'تم إنهاء الجلسة أو حظر الحساب. يرجى مراجعة الإدارة.'], 401);
@@ -1420,22 +1422,24 @@ case 'auth_request_otp':
                 $is_new_user = (strpos($cust['full_name'], 'عميل') === 0);
 
                 // 1. تجديد الجلسة لمنع اختطافها وضمان حفظها فوراً
+                // 1. تجديد الجلسة لمنع اختطافها
                 session_regenerate_id(true); 
 
                 $_SESSION['customer_id'] = $cust['id'];
                 $_SESSION['customer_name'] = $cust['full_name'];
                 $_SESSION['loggedin'] = true;
-                // 2. إغلاق الجلسة فوراً لضمان حفظ البيانات قبل الرد
-                session_write_close();
                 
-                // ⭐ مسح الكوكي بـ SameSite=None
+                // تعريف متغير الأمان الديناميكي للكوكيز
+                $is_secure_cookie = (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on') || (isset($_SERVER['HTTP_X_FORWARDED_PROTO']) && $_SERVER['HTTP_X_FORWARDED_PROTO'] === 'https');
+                
+                // ⭐ مسح الكوكي المؤقت
                 setcookie('state_token', '', [
                     'expires' => time() - 3600,
                     'path' => '/',
                     'domain' => '',
-                    'secure' => true,
+                    'secure' => $is_secure_cookie,
                     'httponly' => true,
-                    'samesite' => 'None'
+                    'samesite' => $is_secure_cookie ? 'None' : 'Lax'
                 ]);
 
                 try {
@@ -1444,31 +1448,35 @@ case 'auth_request_otp':
                     $expires = date('Y-m-d H:i:s', time() + (86400 * 60)); 
                     $pdo->prepare("INSERT INTO auth_tokens (selector, hashed_validator, user_id, expires) VALUES (?, ?, ?, ?)")->execute([$selector, $hashed_validator, $cust['id'], $expires]);
                     
-                    // ⭐ التعديل الصارم لـ Remember Me
+                    // ⭐ التعديل الصارم لـ Remember Me (متوافق مع HTTP و HTTPS)
                     setcookie('remember_me_customer', $selector . ':' . $validator,[
                         'expires' => time() + (86400 * 60),
                         'path' => '/',
                         'domain' => '',
-                        'secure' => true, 
+                        'secure' => $is_secure_cookie, 
                         'httponly' => true,
-                        'samesite' => 'None' 
+                        'samesite' => $is_secure_cookie ? 'None' : 'Lax' 
                     ]);
                 } catch (PDOException $token_error) {}
                 
-// إنشاء توكن للعميل
+                // إنشاء توكن للعميل
                 $payload_token = [
-    'customer_id' => $cust['id'],
-    'customer_name' => $cust['full_name'],
-    'role' => 'customer'
-];
-if (!defined('APP_SECRET_KEY')) define('APP_SECRET_KEY', 'nalsh_fallback_secret_9988');
-$customer_jwt_token = generate_signed_token($payload_token, 43200); // 30 days
+                    'customer_id' => $cust['id'],
+                    'customer_name' => $cust['full_name'],
+                    'role' => 'customer'
+                ];
+                if (!defined('APP_SECRET_KEY')) define('APP_SECRET_KEY', 'nalsh_fallback_secret_9988');
+                $customer_jwt_token = generate_signed_token($payload_token, 43200); // 30 days
+                
+                // 2. إغلاق الجلسة هنا بعد الانتهاء من كل الكوكيز
+                session_write_close();
+
                 send_response('success',[
                     'message' => 'تم تسجيل الدخول بنجاح!', 
                     'token' => $customer_jwt_token, // إرسال التوكن للواجهة
                     'customer' => ['full_name' => $cust['full_name'], 'phone' => $phone], 
                     'needs_profile_update' => $is_new_user
-                ]);                
+                ]);
             } else {
                 $payload['attempts']++;
                 if ($payload['attempts'] >= 3) {
