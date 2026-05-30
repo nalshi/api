@@ -193,37 +193,8 @@ function sync_to_firebase($merchant_username, $node, $item_id, $data, $method = 
 function get_firebase_secret_path($user_id, $username) {
     return md5($user_id . 'SUPER_SECRET_KEY_123' . $username);
 }
-function push_delta_to_kv($store_username, $action, $product_data, $product_id = null) {
-    $worker_url = 'https://your-worker.workers.dev/webhook/push-update';
-    
-    // إنشاء كائن التحديث
-    $update_event = [
-        'timestamp' => time(),
-        'action' => $action, // 'update', 'delete', 'add'
-        'product' => $product_data,
-        'product_id' => $product_id
-    ];
 
-    $payload = json_encode([
-        'store_username' => $store_username,
-        'event' => $update_event
-    ], JSON_UNESCAPED_UNICODE);
 
-    // إرسال سريع (Fire & Forget) إلى Cloudflare Worker ليدمجه في مصفوفة التحديثات
-    $ch = curl_init($worker_url);
-    curl_setopt($ch, CURLOPT_CUSTOMREQUEST, "POST");
-    curl_setopt($ch, CURLOPT_POSTFIELDS, $payload);
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_TIMEOUT, 1); // 1 ثانية لعدم تأخير استجابة التاجر
-    curl_exec($ch);
-    curl_close($ch);
-}
-
-// 💡 أمثلة الاستخدام في api.php:
-// عند تعديل السعر:
-// push_delta_to_kv($merchant_username, 'update', $updated_product_array);
-// عند الحذف:
-// push_delta_to_kv($merchant_username, 'delete', null, $deleted_product_id);
 // دالة لتسجيل علم إعادة بناء الكاش بصمت لمنع توقف النظام
 function flag_cache_for_rebuild($merchant_id = null) {
     global $pdo;
@@ -479,7 +450,24 @@ function extract_coords_from_url($url) {
     }
     return null;
 }
+function update_firebase_manifest($merchant_username) {
+    $fb_url = getenv('FIREBASE_DB_URL') ?: $_ENV['FIREBASE_DB_URL'] ?: 'https://shiban-a2757-default-rtdb.europe-west1.firebasedatabase.app/';
+    if (substr($fb_url, -1) !== '/') $fb_url .= '/';
+    $fb_secret = getenv('FIREBASE_DB_SECRET') ?: $_ENV['FIREBASE_DB_SECRET'] ?: '';
 
+    // توليد رقم إصدار جديد (الوقت الحالي بالملي ثانية)
+    $manifest_data = ['version' => round(microtime(true) * 1000)];
+    
+    $url = $fb_url . "stores/" . $merchant_username . "/manifest.json?auth=" . $fb_secret;
+    $ch = curl_init($url);
+    curl_setopt($ch, CURLOPT_CUSTOMREQUEST, 'PUT');
+    curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($manifest_data));
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 1); // Fire and Forget
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+    curl_exec($ch);
+    curl_close($ch);
+}
 function is_valid_gps_location($url) {
     $coords = extract_coords_from_url($url);
     if (!$coords) return false; 
@@ -629,39 +617,10 @@ register_shutdown_function(function() {
 });
 
 // 1. دالة الإرسال اللحظي الخفيف (تشتغل عند ضغط التاجر "حفظ" ولا تعطل السيرفر)
-function push_delta_to_cloudflare($action_type, $product_data = null, $product_id = null) {
-    $worker_url = 'https://nalsh-cdn.nasermsasalsh.workers.dev/'; // ضع رابطك هنا
-    $secret_token = 'Bearer SECRET_NALSH_2026';
 
-    $payload = json_encode(['action' => $action_type, 'product' => $product_data, 'product_id' => $product_id], JSON_UNESCAPED_UNICODE);
-
-    $ch = curl_init($worker_url);
-    curl_setopt($ch, CURLOPT_CUSTOMREQUEST, "POST");
-    curl_setopt($ch, CURLOPT_POSTFIELDS, $payload);
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_TIMEOUT, 1); // 1 ثانية فقط! (Fire and Forget) يمنع اللاج تماماً
-    curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json', 'Authorization: ' . $secret_token]);
-    curl_exec($ch);
-    curl_close($ch);
-}
 
 // 2. دالة الرفع المجمعة (يستخدمها الـ Cron Job في الخلفية براحته)
-function push_batch_to_cloudflare_kv($updates_array) {
-    $worker_url = 'https://nalsh-sync.nasermsasalsh.workers.dev'; // ضع رابطك هنا
-    $secret_token = 'Bearer SECRET_NALSH_2026';
 
-    $payload = json_encode(['updates' => $updates_array], JSON_UNESCAPED_UNICODE);
-
-    $ch = curl_init($worker_url);
-    curl_setopt($ch, CURLOPT_CUSTOMREQUEST, "POST");
-    curl_setopt($ch, CURLOPT_POSTFIELDS, $payload);
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_TIMEOUT, 15); // وقت كافي لرفع الملفات الكبيرة
-    curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json', 'Authorization: ' . $secret_token]);
-    $res = curl_exec($ch);
-    curl_close($ch);
-    return $res;
-}
 
 // =======================================================
 // 3. الاتصال بقاعدة البيانات ومعالجة الطلب
@@ -1026,75 +985,7 @@ case 'verify_cart_live':
                 'new_cart' => $new_cart
             ]);
             break;    
-    // =======================================================
-        // مهمة الـ Cron Job (تُستدعى كل دقيقة من لوحة تحكم الاستضافة)
-        // =======================================================
-        case 'build_cache_cron':
-    if (($input['secret'] ?? $_GET['secret'] ?? '') !== 'CRON_SECRET_9988') {
-        send_response('error', ['message' => 'غير مصرح'], 403);
-    }
-    try {
-        $cf_updates = [];
-        
-        // 1. جلب الإعدادات والمتاجر من MySQL (كما هي)
-        $settings = json_decode($pdo->query("SELECT setting_value FROM settings WHERE setting_key = 'store_settings'")->fetchColumn() ?: '{}', true);
-        $categories = $pdo->query("SELECT DISTINCT name FROM categories")->fetchAll(PDO::FETCH_COLUMN);
-        $merchants = $pdo->query("SELECT id, username, store_name, store_type FROM users WHERE role = 'merchant' AND is_active = 1")->fetchAll(PDO::FETCH_ASSOC);
 
-        $cf_updates[] = ['key' => '/app/init.json', 'value' => ['settings' => $settings, 'categories' => $categories]];
-        $cf_updates[] = ['key' => '/app/merchants_lite.json', 'value' => $merchants];
-
-        // 2. قراءة قاعدة Firebase بالكامل بدلاً من MySQL
-        $all_firebase_stores = fb_request("stores.json") ?: [];
-        
-        $featured_prods = [];
-
-        foreach ($merchants as $m) {
-            $username = $m['username'];
-            
-            // قراءة المنتجات الخاصة بالتاجر من نسخة الفايربيس المستلمة
-            $store_prods_raw = $all_firebase_stores[$username]['products'] ?? [];
-            $store_prods = [];
-            
-            foreach ($store_prods_raw as $prod) {
-                if ($prod['is_available'] == 1 && ($prod['quantity'] > 0 || $prod['quantity_type'] === 'unlimited')) {
-                    $store_prods[] = $prod;
-                    // تجميع المنتجات للواجهة الرئيسية للعملاء (أحدث 50)
-                    $featured_prods[] = $prod; 
-                }
-            }
-
-            // ترتيب المنتجات الأحدث أولاً
-            usort($store_prods, function($a, $b) { return ($b['updated_at'] ?? 0) <=> ($a['updated_at'] ?? 0); });
-
-            // إعداد معلومات المتجر
-            $stmt_info = $pdo->prepare("SELECT id, username, store_name, phone, store_type, settings FROM users WHERE id = ?");
-            $stmt_info->execute([$m['id']]);
-            $m_info = $stmt_info->fetch(PDO::FETCH_ASSOC);
-            $m_info['settings'] = json_decode($m_info['settings'] ?: '{}', true);
-
-            $cf_updates[] = ['key' => "/stores/{$username}/info.json", 'value' => $m_info];
-            
-            // تقسيم منتجات المتجر إلى صفحات
-            $pages = array_chunk($store_prods, 30);
-            if (empty($pages)) {
-                $cf_updates[] = ['key' => "/stores/{$username}/page_1.json", 'value' => ['has_next' => false, 'products' => []]];
-            } else {
-                foreach ($pages as $index => $page_items) {
-                    $cf_updates[] = ['key' => "/stores/{$username}/page_" . ($index + 1) . ".json", 'value' => ['has_next' => (($index + 1) < count($pages)), 'products' => $page_items]];
-                }
-            }
-        }
-
-        // ترتيب الرئيسية
-        usort($featured_prods, function($a, $b) { return ($b['updated_at'] ?? 0) <=> ($a['updated_at'] ?? 0); });
-        $cf_updates[] = ['key' => '/app/featured_home.json', 'value' => array_slice($featured_prods, 0, 50)];
-
-        // إرسال للـ Cloudflare KV
-        $res = push_batch_to_cloudflare_kv($cf_updates);
-        send_response('success', ['message' => 'Cache built from Firebase and sent to KV', 'cf' => json_decode($res)]);
-    } catch (Exception $e) { send_response('error', ['message' => $e->getMessage()]); }
-    break;
 // ⭐ مسار التحميل الشامل للتطبيق (SPA Initialization) - النسخة المصححة
 case 'get_initial_data':
     // 1. جلب الإعدادات
@@ -3360,7 +3251,7 @@ case 'save_product':
 
     // حفظ في Firebase مباشرة
     fb_request("stores/$merchant_username/products/$pid.json", 'PUT', $product_data);
-
+update_firebase_manifest($merchant_username);
     send_response('success', ['message' => $is_edit ? 'تم التحديث بنجاح.' : 'تم الحفظ بنجاح.']);
     break;
       
@@ -3594,6 +3485,7 @@ case 'delete_product':
 
             // حذفه من Firebase فوراً لكي يختفي من التطبيق اللحظي
             fb_request("stores/$merchant_username/products/$product_id.json", 'DELETE');
+update_firebase_manifest($merchant_username);            
             send_response('success',['message' => 'تم حذف المنتج نهائياً.']);
             break;
 
@@ -4427,7 +4319,7 @@ case 'save_merchant_settings':
             ];
             sync_to_firebase($merchant_username, 'info', null, $fb_settings, 'PUT');           
             $json_settings = json_encode($final_settings, JSON_UNESCAPED_UNICODE);
-            
+update_firebase_manifest($merchant_username);            
             $stmt_update->execute([
                 $storeName, 
                 $storeType ?: $user_record['store_type'], 
