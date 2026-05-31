@@ -492,23 +492,12 @@ function extract_coords_from_url($url) {
     }
     return null;
 }
-function update_firebase_manifest($merchant_username) {
-    $fb_url = getenv('FIREBASE_DB_URL') ?: $_ENV['FIREBASE_DB_URL'] ?: 'https://shiban-a2757-default-rtdb.europe-west1.firebasedatabase.app/';
-    if (substr($fb_url, -1) !== '/') $fb_url .= '/';
-    $fb_secret = getenv('FIREBASE_DB_SECRET') ?: $_ENV['FIREBASE_DB_SECRET'] ?: '';
-
+// دالة تحديث رقم الإصدار في Cloudflare KV (لإجبار هواتف الزبائن على تحديث الكاش)
+function update_kv_manifest($merchant_username) {
     // توليد رقم إصدار جديد (الوقت الحالي بالملي ثانية)
     $manifest_data = ['version' => round(microtime(true) * 1000)];
-    
-    $url = $fb_url . "stores/" . $merchant_username . "/manifest.json?auth=" . $fb_secret;
-    $ch = curl_init($url);
-    curl_setopt($ch, CURLOPT_CUSTOMREQUEST, 'PUT');
-    curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($manifest_data));
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_TIMEOUT, 1); // Fire and Forget
-    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
-    curl_exec($ch);
-    curl_close($ch);
+    // إرسال الرقم الجديد إلى Cloudflare KV
+    kv_request("stores/$merchant_username/manifest", 'PUT', $manifest_data);
 }
 function is_valid_gps_location($url) {
     $coords = extract_coords_from_url($url);
