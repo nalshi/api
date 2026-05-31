@@ -3216,7 +3216,7 @@ case 'save_product':
     $quantity = ($quantity_type === 'unlimited') ? 9999 : (int)($_POST['quantity'] ?? 0);
     $is_available = (!empty($_POST['isAvailable']) || $_POST['isAvailable'] === 'on' || $_POST['isAvailable'] === 'true' || $_POST['isAvailable'] == 1) ? 1 : 0;
     
-    // معالجة القسم وجلب اسمه لتخزينه في Firebase مباشرة
+    // معالجة القسم وجلب اسمه
     $category_id_input = sanitize_input($_POST['category_id'] ?? '');
     $category_name = 'عام';
     if (strpos($category_id_input, 'NEW_CAT:') === 0) {
@@ -3231,7 +3231,11 @@ case 'save_product':
     // معالجة الصورة
     $img = sanitize_input($_POST['existing_image'] ?? '');
     if (isset($_FILES['image_file']) && $_FILES['image_file']['error'] === UPLOAD_ERR_OK) {
-        $api_key = IMGBB_KEYS[array_rand(IMGBB_KEYS)];
+        
+        // ⭐ الإصلاح 1: تعريف مفاتيح ImgBB (ضع مفتاحك الحقيقي هنا)
+        $IMGBB_KEYS = ['635fdb188de27d0c75c873634024c088']; // ضع الـ API Key الخاص بك بدل هذا
+        $api_key = $IMGBB_KEYS[array_rand($IMGBB_KEYS)];
+        
         $ch = curl_init();
         curl_setopt($ch, CURLOPT_URL, "https://api.imgbb.com/1/upload?key=" . $api_key);
         curl_setopt($ch, CURLOPT_POST, true);
@@ -3241,8 +3245,11 @@ case 'save_product':
         curl_setopt($ch, CURLOPT_POSTFIELDS, ['image' => new CURLFile($_FILES['image_file']['tmp_name'], $mime, $filename)]);
         $result = json_decode(curl_exec($ch), true);
         curl_close($ch);
-        if ($result && isset($result['data']['url'])) $img = $result['data']['url'];
-        else throw new Exception("فشل رفع الصورة.");
+        if ($result && isset($result['data']['url'])) {
+            $img = $result['data']['url'];
+        } else {
+            throw new Exception("فشل رفع الصورة لمركز الرفع.");
+        }
     }
     if (empty($img)) throw new Exception("يجب توفير صورة للمنتج.");
 
@@ -3250,17 +3257,19 @@ case 'save_product':
         if ($sell_price <= $cost_price) throw new Exception('سعر البيع يجب أن يكون أعلى من التكلفة.');
         $pid = 'prod_' . generate_uuid();
     } else {
-        // التحقق من أن المنتج مملوك للتاجر من Firebase
-        $existing = fb_request("stores/$merchant_username/products/$pid.json");
-        if (!$existing) throw new Exception("المنتج غير موجود أو لا تملكه.");
+        // التحقق من أن المنتج مملوك للتاجر
+        $existing_check = kv_request("stores/$merchant_username/products");
+        if (!$existing_check || !isset($existing_check[$pid])) {
+            throw new Exception("المنتج غير موجود أو لا تملكه.");
+        }
     }
 
-    // تجهيز مصفوفة المنتج لـ Firebase (شاملة كل التفاصيل لعدم الحاجة لـ MySQL)
+    // تجهيز مصفوفة المنتج
     $store_name = $_SESSION['store_name'] ?? $pdo->query("SELECT store_name FROM users WHERE id = $user_id")->fetchColumn();
     
     $product_data = [
         'id' => $pid,
-        'global_product_id' => $pid, // للتوافق مع الفرونت اند القديم
+        'global_product_id' => $pid,
         'name' => sanitize_input($_POST['name']),
         'mainDescription' => sanitize_input($_POST['mainDescription']),
         'price' => $sell_price,
@@ -3280,12 +3289,19 @@ case 'save_product':
         'updated_at' => time()
     ];
 
-    // حفظ في Firebase مباشرة
-    // حفظ في Cloudflare KV مباشرة
-    kv_request("stores/$merchant_username/products/$pid", 'PUT', $product_data);
-  update_kv_manifest($merchant_username);
-    send_response('success', ['message' => $is_edit ? 'تم التحديث بنجاح.' : 'تم الحفظ بنجاح.']);
-    send_response('success', ['message' => $is_edit ? 'تم التحديث بنجاح.' : 'تم الحفظ بنجاح.']);
+    // ⭐ الإصلاح 2: جلب ملف المنتجات بالكامل، تحديثه، ثم إعادة رفعه
+    $current_products = kv_request("stores/$merchant_username/products") ?: [];
+    
+    // إضافة أو تحديث المنتج في المصفوفة
+    $current_products[$pid] = $product_data;
+    
+    // حفظ المصفوفة الكاملة في Cloudflare KV
+    kv_request("stores/$merchant_username/products", 'PUT', $current_products);
+    
+    // تحديث رقم الإصدار (Manifest) لإجبار هواتف الزبائن على التحديث
+    update_kv_manifest($merchant_username);
+    
+    send_response('success', ['message' => $is_edit ? 'تم التحديث بنجاح.' : 'تم الحفظ بنجاح.', 'id' => $pid]);
     break;
       
 case 'force_sync_to_firebase':
