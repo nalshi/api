@@ -235,6 +235,48 @@ function fb_request($path, $method = 'GET', $data = null) {
     curl_close($ch);
     return json_decode($response, true);
 }
+// =======================================================
+// 🚀 نظام المزامنة الفائقة مع Cloudflare KV Storage (آمن جداً)
+// =======================================================
+function kv_request($path, $method = 'GET', $data = null) {
+    // جلب الرابط والرقم السري من بيئة Render بأمان
+    $kv_url = getenv('WORKER_CDN_URL') ?: $_ENV['WORKER_CDN_URL'] ?: 'https://ny.nasermsasalah.workers.dev/';
+    if (substr($kv_url, -1) !== '/') $kv_url .= '/';
+    $kv_secret = getenv('WORKER_SECRET') ?: $_ENV['WORKER_SECRET'] ?: ''; 
+    
+    // تنظيف المسار
+    $path = str_replace('.json', '', $path);
+    $url = $kv_url . ltrim($path, '/');
+    
+    $ch = curl_init($url);
+    curl_setopt($ch, CURLOPT_CUSTOMREQUEST, $method);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 4); 
+    
+    $headers = ['Content-Type: application/json'];
+    
+    // إذا كان الطلب تعديل أو حذف، يجب إرفاق الرقم السري السري 🚨
+    if ($method !== 'GET') {
+        if (empty($kv_secret)) throw new Exception("لم يتم إعداد WORKER_SECRET في السيرفر بشكل صحيح.");
+        $headers[] = 'Authorization: Bearer ' . $kv_secret;
+    }
+    
+    curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+    if ($data !== null) {
+        curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data, JSON_UNESCAPED_UNICODE));
+    }
+    
+    $response = curl_exec($ch);
+    $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+    
+    if ($http_code == 401 || $http_code == 403) {
+        throw new Exception("تم رفض الوصول إلى التخزين السحابي (محاولة اختراق أو مفتاح خاطئ).");
+    }
+    
+    return json_decode($response, true);
+}
 function simple_php_hash($str) {
     $hash = 0;
     $len = strlen($str);
@@ -3250,8 +3292,9 @@ case 'save_product':
     ];
 
     // حفظ في Firebase مباشرة
-    fb_request("stores/$merchant_username/products/$pid.json", 'PUT', $product_data);
-update_firebase_manifest($merchant_username);
+    // حفظ في Cloudflare KV مباشرة
+    kv_request("stores/$merchant_username/products/$pid", 'PUT', $product_data);
+    update_firebase_manifest($merchant_username);
     send_response('success', ['message' => $is_edit ? 'تم التحديث بنجاح.' : 'تم الحفظ بنجاح.']);
     break;
       
@@ -3284,7 +3327,7 @@ case 'force_sync_to_firebase':
                 $sync_count++;
             }
             if (!empty($fb_products)) {
-                sync_to_firebase($m_username, 'products', null, $fb_products, 'PUT');
+                kv_request("stores/$m_username/products", 'PUT', $fb_products);
             }
 
             // 3. رفع الطلبات النشطة
@@ -3415,9 +3458,9 @@ case 'search_products':
     $term = strtolower(sanitize_input($input['term'] ?? ''));
     
     // جلب المنتجات من Firebase للتاجر الحالي
-    $fb_products = fb_request("stores/$merchant_username/products.json");
+    // جلب المنتجات من Cloudflare KV للتاجر الحالي
+    $fb_products = kv_request("stores/$merchant_username/products");
     $products = $fb_products ? array_values($fb_products) : [];
-
     // الترتيب حسب الأحدث
     usort($products, function($a, $b) {
         return ($b['updated_at'] ?? 0) <=> ($a['updated_at'] ?? 0);
@@ -3490,30 +3533,16 @@ update_firebase_manifest($merchant_username);
             break;
 
 case 'toggle_availability':
+case 'toggle_availability':
     if (!$user_id) send_response('error',['message' => 'غير مصرح'], 401);
     $product_id = sanitize_input($input['id']);
     $req_status = (int)$input['isAvailable'];
     $merchant_username = $_SESSION['username'] ?? $pdo->query("SELECT username FROM users WHERE id = $user_id")->fetchColumn();
 
-    // تحديث جزئي (PATCH) في Firebase
-    fb_request("stores/$merchant_username/products/$product_id.json", 'PATCH', ['is_available' => $req_status, 'updated_at' => time()]);
+    // تحديث جزئي (PATCH) في Cloudflare KV
+    kv_request("stores/$merchant_username/products/$product_id", 'PATCH', ['is_available' => $req_status, 'updated_at' => time()]);
     
     send_response('success',['message' => 'تم تحديث حالة المنتج']);
-    break;
-
-case 'add_quantity':
-    if (!$user_id) send_response('error',['message' => 'غير مصرح'], 401);
-    $product_id = sanitize_input($input['productId']);
-    $qty_to_add = (int)$input['quantity'];
-    $merchant_username = $_SESSION['username'] ?? $pdo->query("SELECT username FROM users WHERE id = $user_id")->fetchColumn();
-
-    $product = fb_request("stores/$merchant_username/products/$product_id.json");
-    if (!$product) throw new Exception("المنتج غير موجود.");
-
-    $new_qty = (int)($product['quantity'] ?? 0) + $qty_to_add;
-    fb_request("stores/$merchant_username/products/$product_id.json", 'PATCH', ['quantity' => $new_qty, 'updated_at' => time()]);
-    
-    send_response('success',['message' => 'تمت إضافة المخزون']);
     break;
 
         case 'review_product':
@@ -3544,41 +3573,19 @@ flag_cache_for_rebuild($user_id ?? null); }
             break;
 
         case 'add_quantity':
-            if (!$user_id) send_response('error',['message' => 'غير مصرح'], 401);
-            $pid = sanitize_input($input['productId']);
-            $qty = (int)$input['quantity'];
-            
-            if (!in_array($user_role, ['merchant', 'admin'])) throw new Exception("غير مصرح لك.");
+    if (!$user_id) send_response('error',['message' => 'غير مصرح'], 401);
+    $product_id = sanitize_input($input['productId']);
+    $qty_to_add = (int)$input['quantity'];
+    $merchant_username = $_SESSION['username'] ?? $pdo->query("SELECT username FROM users WHERE id = $user_id")->fetchColumn();
 
-            $sql = "UPDATE merchant_listings SET quantity = quantity + ? WHERE global_product_id = ? AND merchant_id = ?";
-            $params = [$qty, $pid, $user_id];
-            
-            if ($user_role === 'admin' && isset($input['merchant_id'])) {
-                $params[2] = sanitize_input($input['merchant_id']);
-            }
-            
-            $stmt = $pdo->prepare($sql);
-            $stmt->execute($params);
+    $product = kv_request("stores/$merchant_username/products/$product_id");
+    if (!$product) throw new Exception("المنتج غير موجود.");
 
-            if($stmt->rowCount() > 0) {
-                // 🚀 [المزامنة اللحظية مع Firebase بعد إضافة الكمية]
-                $m_id = $params[2];
-                $stmt_username = $pdo->prepare("SELECT username FROM users WHERE id = ?"); $stmt_username->execute([$m_id]);
-                $m_username = $stmt_username->fetchColumn();
-
-                $stmt_get = $pdo->prepare("SELECT p.id as global_product_id, p.name, p.mainDescription as description, p.image, p.sizes as options, p.discount, p.department, p.category_id, l.id as listing_id, l.merchant_price as price, l.quantity, l.quantity_type, l.currency, c.name as type, u.id as merchant_id, u.username as merchant_username, u.store_name as merchant_name FROM merchant_listings l JOIN products p ON l.global_product_id = p.id JOIN users u ON l.merchant_id = u.id LEFT JOIN categories c ON p.category_id = c.id WHERE p.id = ? LIMIT 1");
-                $stmt_get->execute([$pid]);
-                $updated_p = $stmt_get->fetch(PDO::FETCH_ASSOC);
-                if ($updated_p && $m_username) {
-                    $updated_p['options'] = json_decode($updated_p['options'] ?? '[]', true) ?:[];
-                    sync_to_firebase($m_username, 'products', $pid, $updated_p, 'PUT');
-                }
-
-                send_response('success',['message' => 'تمت إضافة المخزون']);
-            } else {
-                throw new Exception('فشل تحديث المخزون. تأكد من أنك تملك هذا المنتج.');
-            }
-            break;
+    $new_qty = (int)($product['quantity'] ?? 0) + $qty_to_add;
+    kv_request("stores/$merchant_username/products/$product_id", 'PATCH', ['quantity' => $new_qty, 'updated_at' => time()]);
+    
+    send_response('success',['message' => 'تمت إضافة المخزون']);
+    break;
         case 'process_sale':
     if (!$user_id) send_response('error',['message' => 'غير مصرح'], 401);
     $pid = sanitize_input($input['productId']); 
@@ -3590,13 +3597,14 @@ flag_cache_for_rebuild($user_id ?? null); }
         $pdo->beginTransaction();
         
         // قراءة المنتج من Firebase للتحقق
-        $product = fb_request("stores/$merchant_username/products/$pid.json");
+        // قراءة المنتج من Cloudflare للتحقق
+        $product = kv_request("stores/$merchant_username/products/$pid");
         if (!$product) throw new Exception("المنتج غير موجود.");
 
         if ($product['quantity_type'] === 'tracked') {
             if ($product['quantity'] < $qty_to_sell) throw new Exception("الكمية غير متوفرة في المخزون.");
             $new_qty = $product['quantity'] - $qty_to_sell;
-            fb_request("stores/$merchant_username/products/$pid.json", 'PATCH', ['quantity' => $new_qty]);
+            kv_request("stores/$merchant_username/products/$pid", 'PATCH', ['quantity' => $new_qty]);
         }
 
         $price = $product['price'] * (1 - (($product['discount']??0)/100)); 
@@ -4165,101 +4173,106 @@ case 'merchant_approve_order':
             }
             break;    
 case 'merchant_cancel_order':
-            if ($user_role !== 'merchant') throw new Exception("غير مصرح لك.");
-            $order_id = sanitize_input($input['order_id']);
-            $reason = sanitize_input($input['reason'] ?? 'تم الإلغاء من قبل التاجر');
+    if ($user_role !== 'merchant') throw new Exception("غير مصرح لك.");
+    $order_id = sanitize_input($input['order_id']);
+    $reason = sanitize_input($input['reason'] ?? 'تم الإلغاء من قبل التاجر');
 
-            try {
-                $pdo->beginTransaction();
-                
-                // 1. جلب بيانات الطلب النشط لنقله للأرشيف
-                $stmt = $pdo->prepare("SELECT ticket_id, customer_id, ticket_data, status FROM live_tickets WHERE ticket_id = ? AND merchant_id = ? FOR UPDATE");
-                $stmt->execute([$order_id, $user_id]);
-                $ticket = $stmt->fetch(PDO::FETCH_ASSOC);
+    try {
+        $pdo->beginTransaction();
+        
+        // 1. جلب بيانات الطلب النشط لنقله للأرشيف من قاعدة البيانات (MySQL)
+        $stmt = $pdo->prepare("SELECT ticket_id, customer_id, ticket_data, status FROM live_tickets WHERE ticket_id = ? AND merchant_id = ? FOR UPDATE");
+        $stmt->execute([$order_id, $user_id]);
+        $ticket = $stmt->fetch(PDO::FETCH_ASSOC);
 
-                if (!$ticket) throw new Exception("الطلب غير موجود أو تم التعامل معه مسبقاً.");
+        if (!$ticket) throw new Exception("الطلب غير موجود أو تم التعامل معه مسبقاً.");
 
-                $ticket_data = json_decode($ticket['ticket_data'], true) ?: [];
-                $ticket_data['cancel_reason'] = $reason;
-                $ticket_data['id'] = $order_id;
-                $ticket_data['status'] = 'cancelled';
+        $ticket_data = json_decode($ticket['ticket_data'], true) ?: [];
+        $ticket_data['cancel_reason'] = $reason;
+        $ticket_data['id'] = $order_id;
+        $ticket_data['status'] = 'cancelled';
 
-                // 2. إدخال السجل في الأرشيف كطلب ملغي
-                $archive_stmt = $pdo->prepare("INSERT INTO orders_archive (ticket_id, customer_id, merchant_id, final_status, total_amount, archived_data) VALUES (?, ?, ?, 'cancelled', ?, ?)");
-                $grand_total = $ticket_data['financials']['grand_total'] ?? 0;
-                $archive_stmt->execute([$order_id, $ticket['customer_id'], $user_id, $grand_total, json_encode($ticket_data, JSON_UNESCAPED_UNICODE)]);
+        // 2. إدخال السجل في الأرشيف (MySQL) كطلب ملغي
+        $archive_stmt = $pdo->prepare("INSERT INTO orders_archive (ticket_id, customer_id, merchant_id, final_status, total_amount, archived_data) VALUES (?, ?, ?, 'cancelled', ?, ?)");
+        $grand_total = $ticket_data['financials']['grand_total'] ?? 0;
+        $archive_stmt->execute([$order_id, $ticket['customer_id'], $user_id, $grand_total, json_encode($ticket_data, JSON_UNESCAPED_UNICODE)]);
 
-                // 3. إعادة كميات المنتجات إلى مخزن التاجر في فايربيس للمنتجات محدودة الكمية
-                $items = $ticket_data['items'] ?? [];
-                $merchant_username = $_SESSION['username'] ?? '';
-                
-                if (empty($merchant_username)) {
-                    $stmt_u = $pdo->prepare("SELECT username FROM users WHERE id = ?");
-                    $stmt_u->execute([$user_id]);
-                    $merchant_username = $stmt_u->fetchColumn() ?: '';
-                }
+        // 3. إعادة كميات المنتجات إلى مخزن التاجر في (Cloudflare KV) 🚀
+        $items = $ticket_data['items'] ?? [];
+        $merchant_username = $_SESSION['username'] ?? '';
+        
+        if (empty($merchant_username)) {
+            $stmt_u = $pdo->prepare("SELECT username FROM users WHERE id = ?");
+            $stmt_u->execute([$user_id]);
+            $merchant_username = $stmt_u->fetchColumn() ?: '';
+        }
 
-                $fb_products = fb_request("stores/$merchant_username/products.json") ?: [];
+        // 🌟 جلب المنتجات الحالية من Cloudflare KV
+        $fb_products = kv_request("stores/$merchant_username/products") ?: [];
 
-                foreach ($items as $item) {
-                    $pid = $item['product_id'];
-                    $qty = (int)$item['quantity'];
-                    
-                    if (isset($fb_products[$pid])) {
-                        $product = $fb_products[$pid];
-                        if (($product['quantity_type'] ?? 'tracked') === 'tracked') {
-                            if (!empty($item['size_id']) && !empty($product['options'])) {
-                                $options_array = $product['options'];
-                                foreach ($options_array as &$opt) {
-                                    if (isset($opt['id']) && $opt['id'] === $item['size_id']) {
-                                        $opt['quantity'] = (int)($opt['quantity'] ?? 0) + $qty;
-                                        break;
-                                    }
-                                }
-                                unset($opt);
-                                
-                                $total_remaining_qty = 0;
-                                foreach ($options_array as $opt) {
-                                    $total_remaining_qty += (int)($opt['quantity'] ?? 0);
-                                }
-                                
-                                fb_request("stores/$merchant_username/products/$pid.json", 'PATCH', [
-                                    'quantity' => $total_remaining_qty,
-                                    'options' => $options_array,
-                                    'updated_at' => time()
-                                ]);
-                            } else {
-                                $new_qty = (int)($product['quantity'] ?? 0) + $qty;
-                                fb_request("stores/$merchant_username/products/$pid.json", 'PATCH', [
-                                    'quantity' => $new_qty,
-                                    'updated_at' => time()
-                                ]);
+        foreach ($items as $item) {
+            $pid = $item['product_id'];
+            $qty = (int)$item['quantity'];
+            
+            if (isset($fb_products[$pid])) {
+                $product = $fb_products[$pid];
+                if (($product['quantity_type'] ?? 'tracked') === 'tracked') {
+                    if (!empty($item['size_id']) && !empty($product['options'])) {
+                        $options_array = $product['options'];
+                        foreach ($options_array as &$opt) {
+                            if (isset($opt['id']) && $opt['id'] === $item['size_id']) {
+                                $opt['quantity'] = (int)($opt['quantity'] ?? 0) + $qty;
+                                break;
                             }
                         }
+                        unset($opt);
+                        
+                        $total_remaining_qty = 0;
+                        foreach ($options_array as $opt) {
+                            $total_remaining_qty += (int)($opt['quantity'] ?? 0);
+                        }
+                        
+                        // 🌟 تحديث الكمية للخيار المحدد في Cloudflare KV
+                        kv_request("stores/$merchant_username/products/$pid", 'PATCH', [
+                            'quantity' => $total_remaining_qty,
+                            'options' => $options_array,
+                            'updated_at' => time()
+                        ]);
+                    } else {
+                        $new_qty = (int)($product['quantity'] ?? 0) + $qty;
+                        
+                        // 🌟 تحديث الكمية للمنتج العادي في Cloudflare KV
+                        kv_request("stores/$merchant_username/products/$pid", 'PATCH', [
+                            'quantity' => $new_qty,
+                            'updated_at' => time()
+                        ]);
                     }
                 }
-
-                // 4. حذف التذكرة النشطة من جدول live_tickets في MySQL
-                $pdo->prepare("DELETE FROM live_tickets WHERE ticket_id = ?")->execute([$order_id]);
-
-                $pdo->commit();
-
-                // 5. تحديث الأرشيف وحذف السجل النشط من سحابة Firebase
-                $merchant_secret_hash = md5($user_id . APP_SECRET_KEY . 'orders');
-                
-                // إضافة للأرشيف السري
-                sync_to_firebase($merchant_username, "secure_archived_orders/$merchant_secret_hash", $order_id, $ticket_data, 'PUT');
-                // حذف من الطلبات النشطة السرية
-                sync_to_firebase($merchant_username, "secure_active_orders/$merchant_secret_hash", $order_id, null, 'DELETE');
-                // 3. 🌟 تحديث مسار التتبع اللحظي للعميل
-                update_order_tracking($merchant_username, $order_id, 'cancelled');
-
-                send_response('success', ['message' => 'تم إلغاء الطلب بنجاح وإعادة المنتجات للمخزون.']);
-            } catch (Exception $e) {
-                if ($pdo->inTransaction()) $pdo->rollBack();
-                throw $e;
             }
-            break;
+        }
+
+        // 4. حذف التذكرة النشطة من جدول live_tickets في MySQL
+        $pdo->prepare("DELETE FROM live_tickets WHERE ticket_id = ?")->execute([$order_id]);
+
+        $pdo->commit();
+
+        // 5. تحديث الأرشيف وحذف السجل النشط من سحابة Firebase (للطلبات اللحظية)
+        $merchant_secret_hash = md5($user_id . APP_SECRET_KEY . 'orders');
+        
+        // إضافة الطلب للأرشيف السري في فايربيس
+        sync_to_firebase($merchant_username, "secure_archived_orders/$merchant_secret_hash", $order_id, $ticket_data, 'PUT');
+        // حذف الطلب من الطلبات النشطة السرية في فايربيس
+        sync_to_firebase($merchant_username, "secure_active_orders/$merchant_secret_hash", $order_id, null, 'DELETE');
+        
+        // تحديث مسار التتبع اللحظي للعميل
+        update_order_tracking($merchant_username, $order_id, 'cancelled');
+
+        send_response('success', ['message' => 'تم إلغاء الطلب بنجاح وإعادة المنتجات للمخزون.']);
+    } catch (Exception $e) {
+        if ($pdo->inTransaction()) $pdo->rollBack();
+        throw $e;
+    }
+    break;
 case 'save_merchant_settings':
             if ($user_role !== 'merchant') {
                 throw new Exception("غير مصرح لك بالقيام بهذا الإجراء.");
