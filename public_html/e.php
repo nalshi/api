@@ -11,7 +11,7 @@ error_reporting(E_ALL);
 // ====================================================================
 // ⚙️ 1. الإعدادات (قم بوضع المفتاح السري هنا يدوياً للفحص)
 // ====================================================================
-$worker_url = getenv('WORKER_CDN_URL') ?: 'https://ny.nasermsasalsh.workers.dev/';
+$worker_url = getenv('WORKER_CDN_URL') ?: 'https://ny.nasermsasalsh.workers.dev';
 $worker_secret = getenv('WORKER_SECRET') ?: 'Naser_KV_Secure_998877_XyZ'; // 👈 ضع الرقم السري هنا بين علامتي التنصيص إذا كان المتغير لا يعمل
 
 // بيانات تجريبية للإرسال
