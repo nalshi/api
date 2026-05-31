@@ -3231,9 +3231,7 @@ case 'save_product':
     // معالجة الصورة
     $img = sanitize_input($_POST['existing_image'] ?? '');
     if (isset($_FILES['image_file']) && $_FILES['image_file']['error'] === UPLOAD_ERR_OK) {
-        
-        // ⭐ الإصلاح 1: تعريف مفاتيح ImgBB (ضع مفتاحك الحقيقي هنا)
-        $IMGBB_KEYS = ['635fdb188de27d0c75c873634024c088']; // ضع الـ API Key الخاص بك بدل هذا
+   ضع الـ API Key الخاص بك بدل هذا
         $api_key = $IMGBB_KEYS[array_rand($IMGBB_KEYS)];
         
         $ch = curl_init();
