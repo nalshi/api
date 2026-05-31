@@ -239,14 +239,11 @@ function fb_request($path, $method = 'GET', $data = null) {
 // 🚀 نظام المزامنة الفائقة مع Cloudflare KV Storage (آمن جداً)
 // =======================================================
 function kv_request($path, $method = 'GET', $data = null) {
-    // 1. قراءة الرابط والرقم السري من إعدادات Render بشكل إجباري (مضمون 100%)
     $kv_url = getenv('WORKER_CDN_URL') ?: $_SERVER['WORKER_CDN_URL'] ?? 'https://ny.nasermsasalah.workers.dev/';
     if (substr($kv_url, -1) !== '/') $kv_url .= '/';
     
-    // كلمة المرور تقرأ من Render فقط!
     $kv_secret = getenv('WORKER_SECRET') ?: $_SERVER['WORKER_SECRET'] ?? ''; 
     
-    // 2. تنظيف المسار وتجهيز الرابط
     $path = str_replace('.json', '', $path);
     $url = $kv_url . ltrim($path, '/');
     
@@ -254,16 +251,12 @@ function kv_request($path, $method = 'GET', $data = null) {
     curl_setopt($ch, CURLOPT_CUSTOMREQUEST, $method);
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
     curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
-    curl_setopt($ch, CURLOPT_TIMEOUT, 4); 
+    curl_setopt($ch, CURLOPT_TIMEOUT, 6); 
     
     $headers = ['Content-Type: application/json'];
     
-    // 3. 🚨 حماية صارمة: إذا كان الطلب رفع أو تعديل، يجب وجود مفتاح Render
     if ($method !== 'GET') {
-        if (empty($kv_secret)) {
-            // إيقاف العملية فوراً وإظهار خطأ إذا لم يجد المفتاح في Render
-            throw new Exception("حماية النظام: مفتاح التخزين (WORKER_SECRET) مفقود من إعدادات Render.");
-        }
+        if (empty($kv_secret)) throw new Exception("حماية النظام: مفتاح التخزين مفقود من إعدادات Render.");
         $headers[] = 'Authorization: Bearer ' . $kv_secret;
     }
     
@@ -276,9 +269,14 @@ function kv_request($path, $method = 'GET', $data = null) {
     $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
     curl_close($ch);
     
-    // 4. التحقق من صحة كلمة المرور المدخلة في Render
+    // ⭐ إضافة قراءة شاملة لأي أخطاء من Cloudflare 
     if ($http_code == 401 || $http_code == 403) {
-        throw new Exception("تم رفض الوصول! كلمة المرور (WORKER_SECRET) في Render لا تتطابق مع التخزين السحابي.");
+        throw new Exception("تم رفض الوصول إلى Cloudflare (الرقم السري WORKER_SECRET غير متطابق).");
+    } elseif ($http_code >= 500) {
+        // إذا نسي المبرمج ربط STORE_KV، سيظهر هذا الخطأ للتاجر بدلاً من "نجاح وهمي"
+        throw new Exception("حدث خطأ داخل سيرفر التخزين (Cloudflare Worker 500 Error). تأكد من ربط STORE_KV.");
+    } elseif ($http_code == 404) {
+        throw new Exception("المسار غير موجود في Worker Cloudflare (404 Error).");
     }
     
     return json_decode($response, true);
