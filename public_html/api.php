@@ -962,7 +962,35 @@ case 'get_firebase_config':
     if (empty($config['apiKey'])) throw new Exception("إعدادات الإشعارات غير مهيأة.");
     send_response('success', ['config' => $config]);
     break;
-
+case 'upload_image':
+            if (!$user_id) send_response('error', ['message' => 'غير مصرح'], 401);
+            if (isset($_FILES['image_data']) && $_FILES['image_data']['error'] === UPLOAD_ERR_OK) {
+                
+                // قراءة المفتاح من Render
+                $env_keys = getenv('IMGBB_KEYS') ?: $_ENV['IMGBB_KEYS'] ?? '';
+                if (empty($env_keys)) throw new Exception("مفتاح السيرفر مفقود.");
+                
+                $keys_array = array_map('trim', explode(',', $env_keys));
+                $api_key = $keys_array[array_rand($keys_array)];
+                
+                $ch = curl_init();
+                curl_setopt($ch, CURLOPT_URL, "https://api.imgbb.com/1/upload?key=" . $api_key);
+                curl_setopt($ch, CURLOPT_POST, true);
+                curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+                $mime = mime_content_type($_FILES['image_data']['tmp_name']);
+                $filename = $_FILES['image_data']['name'] ?? 'variant.webp';
+                curl_setopt($ch, CURLOPT_POSTFIELDS, ['image' => new CURLFile($_FILES['image_data']['tmp_name'], $mime, $filename)]);
+                $result = json_decode(curl_exec($ch), true);
+                curl_close($ch);
+                
+                if ($result && isset($result['data']['url'])) {
+                    send_response('success', ['url' => $result['data']['url']]);
+                } else {
+                    throw new Exception("فشل رفع صورة الخيار المتعدد.");
+                }
+            }
+            throw new Exception("لم يتم استلام أي صورة صالحة.");
+            break;
 case 'save_fcm_token':
     if (!$user_id) send_response('error', ['message' => 'غير مصرح'], 401);
     $fcm_token = sanitize_input($input['fcm_token'] ?? '');
@@ -3229,9 +3257,20 @@ case 'save_product':
     }
 
     // معالجة الصورة
+    // معالجة الصورة
     $img = sanitize_input($_POST['existing_image'] ?? '');
     if (isset($_FILES['image_file']) && $_FILES['image_file']['error'] === UPLOAD_ERR_OK) {
-        $api_key = $IMGBB_KEYS[array_rand($IMGBB_KEYS)];
+        
+        // 1. قراءة المفتاح من إعدادات Render
+        $env_keys = getenv('IMGBB_KEYS') ?: $_ENV['IMGBB_KEYS'] ?? '';
+        
+        if (empty($env_keys)) {
+            throw new Exception("مفتاح رفع الصور (IMGBB_KEYS) مفقود من إعدادات السيرفر.");
+        }
+        
+        // 2. تحويل النص إلى مصفوفة (يدعم مفتاح واحد أو عدة مفاتيح مفصولة بفاصلة)
+        $keys_array = array_map('trim', explode(',', $env_keys));
+        $api_key = $keys_array[array_rand($keys_array)]; // اختيار آمن
         
         $ch = curl_init();
         curl_setopt($ch, CURLOPT_URL, "https://api.imgbb.com/1/upload?key=" . $api_key);
@@ -3242,6 +3281,7 @@ case 'save_product':
         curl_setopt($ch, CURLOPT_POSTFIELDS, ['image' => new CURLFile($_FILES['image_file']['tmp_name'], $mime, $filename)]);
         $result = json_decode(curl_exec($ch), true);
         curl_close($ch);
+        
         if ($result && isset($result['data']['url'])) {
             $img = $result['data']['url'];
         } else {
