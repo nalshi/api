@@ -3283,7 +3283,8 @@ case 'save_product':
     // حفظ في Firebase مباشرة
     // حفظ في Cloudflare KV مباشرة
     kv_request("stores/$merchant_username/products/$pid", 'PUT', $product_data);
-    update_firebase_manifest($merchant_username);
+  update_kv_manifest($merchant_username);
+    send_response('success', ['message' => $is_edit ? 'تم التحديث بنجاح.' : 'تم الحفظ بنجاح.']);
     send_response('success', ['message' => $is_edit ? 'تم التحديث بنجاح.' : 'تم الحفظ بنجاح.']);
     break;
       
@@ -3517,7 +3518,8 @@ case 'delete_product':
 
             // حذفه من Firebase فوراً لكي يختفي من التطبيق اللحظي
             fb_request("stores/$merchant_username/products/$product_id.json", 'DELETE');
-update_firebase_manifest($merchant_username);            
+update_kv_manifest($merchant_username);            
+            send_response('success',['message' => 'تم حذف المنتج نهائياً.']);    
             send_response('success',['message' => 'تم حذف المنتج نهائياً.']);
             break;
 
@@ -4320,8 +4322,11 @@ case 'save_merchant_settings':
                 'settings' => $final_settings
             ];
             sync_to_firebase($merchant_username, 'info', null, $fb_settings, 'PUT');           
-            $json_settings = json_encode($final_settings, JSON_UNESCAPED_UNICODE);
-update_firebase_manifest($merchant_username);            
+$json_settings = json_encode($final_settings, JSON_UNESCAPED_UNICODE);
+            
+            // احذف السطر القديم وضع هذا:
+            update_kv_manifest($merchant_username);            
+            
             $stmt_update->execute([
                 $storeName, 
                 $storeType ?: $user_record['store_type'], 
