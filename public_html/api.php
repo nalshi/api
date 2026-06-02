@@ -289,7 +289,62 @@ function kv_request($path, $method = 'GET', $data = null) {
     
     return json_decode($response, true);
 }
+// =======================================================
+// 🚀 نظام المزامنة الآمنة والسريعة مع GitHub API (مستودع JSON)
+// =======================================================
+function sync_to_github($path, $data, $method = 'PUT', $commit_message = "Auto-update from system") {
+    // جلب المفاتيح بأمان من Render
+    $gh_token = getenv('GITHUB_TOKEN') ?: $_ENV['GITHUB_TOKEN'] ?? '';
+    $gh_owner = getenv('GITHUB_REPO_OWNER') ?: $_ENV['GITHUB_REPO_OWNER'] ?? '';
+    $gh_repo  = getenv('GITHUB_REPO_NAME') ?: $_ENV['GITHUB_REPO_NAME'] ?? '';
 
+    // إيقاف الدالة بصمت إذا لم يتم إعداد المفاتيح (لحماية النظام من التوقف)
+    if (empty($gh_token) || empty($gh_owner) || empty($gh_repo)) return;
+
+    $url = "https://api.github.com/repos/{$gh_owner}/{$gh_repo}/contents/" . ltrim($path, '/');
+    $headers = [
+        "Authorization: Bearer {$gh_token}",
+        "Accept: application/vnd.github+json",
+        "User-Agent: Nalsh-Ecom-System/1.0",
+        "X-GitHub-Api-Version: 2022-11-28"
+    ];
+
+    // 1. جلب الـ SHA الخاص بالملف (مطلوب أساسي في GitHub لتحديث ملف موجود)
+    $ch = curl_init($url);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 2); // ثانيتين كحد أقصى حتى لا يعلق النظام
+    $response = curl_exec($ch);
+    $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+
+    $sha = null;
+    if ($http_code == 200) {
+        $file_info = json_decode($response, true);
+        $sha = $file_info['sha'] ?? null;
+    }
+
+    if ($method === 'DELETE' && !$sha) return; // لا حاجة للحذف إذا لم يكن الملف موجوداً
+
+    // 2. تجهيز البيانات والتشفير
+    $payload = ["message" => $commit_message];
+    if ($sha) $payload["sha"] = $sha;
+    
+    if ($method !== 'DELETE') {
+        $json_content = json_encode($data, JSON_UNESCAPED_UNICODE);
+        $payload["content"] = base64_encode($json_content); // GitHub يقبل Base64 فقط
+    }
+
+    // 3. إرسال التحديث إلى GitHub
+    $ch2 = curl_init($url);
+    curl_setopt($ch2, CURLOPT_CUSTOMREQUEST, $method);
+    curl_setopt($ch2, CURLOPT_POSTFIELDS, json_encode($payload));
+    curl_setopt($ch2, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch2, CURLOPT_HTTPHEADER, $headers);
+    curl_setopt($ch2, CURLOPT_TIMEOUT, 3); // 3 ثوانٍ للكتابة
+    curl_exec($ch2);
+    curl_close($ch2);
+}
 function simple_php_hash($str) {
     $hash = 0;
     $len = strlen($str);
@@ -444,7 +499,93 @@ function sanitize_input($data) {
     $data = trim($data ?? '');
     return htmlspecialchars($data, ENT_QUOTES, 'UTF-8');
 }
+function trigger_cache_rebuild($merchant_id) {
+    // جلب رابط الـ Worker السري
+    $worker_url = getenv('WORKER_D1_URL') ?: $_SERVER['WORKER_D1_URL'] ?? '';
+    $worker_secret = getenv('WORKER_SECRET') ?: $_SERVER['WORKER_SECRET'] ?? '';
+    
+    if (empty($worker_url) || empty($worker_secret)) return;
 
+    // استخراج الدومين الأساسي للـ Worker
+    $parsed = parse_url($worker_url);
+    $base_worker_url = $parsed['scheme'] . '://' . $parsed['host'];
+    
+    // إرسال طلب خلفي للـ Worker ليقوم ببناء الكاش من D1
+    $ch = curl_init($base_worker_url . "/api/rebuild-cache/" . $merchant_id);
+    curl_setopt($ch, CURLOPT_CUSTOMREQUEST, 'POST');
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 2); // 2 ثانية فقط حتى لا يتأخر التاجر
+    curl_setopt($ch, CURLOPT_HTTPHEADER, [
+        'Content-Type: application/json',
+        'Authorization: Bearer ' . $worker_secret
+    ]);
+    curl_exec($ch);
+    curl_close($ch);
+}
+// =======================================================
+// 🚀 دالة إجبار شبكة jsDelivr CDN على تحديث الكاش فوراً
+// =======================================================
+// 🚀 دالة إجبار شبكة jsDelivr CDN على تحديث الكاش فوراً
+function purge_jsdelivr_cache($merchant_username) {
+    $gh_owner = getenv('GITHUB_REPO_OWNER') ?: $_ENV['GITHUB_REPO_OWNER'] ?? 'nalshi';
+    $gh_repo  = getenv('GITHUB_REPO_NAME') ?: $_ENV['GITHUB_REPO_NAME'] ?? 'nynn';
+
+    if (empty($gh_owner) || empty($gh_repo)) return;
+
+    // رابط الـ Purge لتحديث ملفات المنتجات والمانيفست والإعدادات
+    $urls_to_purge = [
+        "https://purge.jsdelivr.net/gh/{$gh_owner}/{$gh_repo}@main/stores/{$merchant_username}/products.json",
+        "https://purge.jsdelivr.net/gh/{$gh_owner}/{$gh_repo}@main/stores/{$merchant_username}/manifest.json",
+        "https://purge.jsdelivr.net/gh/{$gh_owner}/{$gh_repo}@main/stores/{$merchant_username}/info.json"
+    ];
+
+    foreach ($urls_to_purge as $purge_url) {
+        $ch = curl_init(); // تم إصلاح هذا السطر
+        curl_setopt($ch, CURLOPT_URL, $purge_url);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 1); // 1 ثانية حتى لا يبطئ الطلب
+        curl_exec($ch);
+        curl_close($ch);
+    }
+}
+function d1_request($sql, $params = []) {
+    // جلب القيم من Render فقط!
+    $d1_url = getenv('WORKER_D1_URL') ?: $_SERVER['WORKER_D1_URL'] ?? '';
+    $d1_secret = getenv('WORKER_SECRET') ?: $_SERVER['WORKER_SECRET'] ?? ''; 
+    
+    // إيقاف النظام فوراً إذا لم تكن القيم موجودة في Render
+    if (empty($d1_url) || empty($d1_secret)) {
+        throw new Exception("CRITICAL ERROR: D1 Worker configuration is missing in Render Environment.");
+    }
+    
+    $ch = curl_init($d1_url);
+    curl_setopt($ch, CURLOPT_CUSTOMREQUEST, 'POST');
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 5); 
+    
+    $payload = json_encode(['sql' => $sql, 'params' => $params], JSON_UNESCAPED_UNICODE);
+    
+    curl_setopt($ch, CURLOPT_HTTPHEADER, [
+        'Content-Type: application/json',
+        'Authorization: Bearer ' . $d1_secret
+    ]);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, $payload);
+    
+    $response = curl_exec($ch);
+    $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+    
+    if ($http_code != 200) {
+        throw new Exception("D1 Database Error (HTTP $http_code): " . $response);
+    }
+    
+    $result = json_decode($response, true);
+    if (!$result || !isset($result['success']) || !$result['success']) {
+        throw new Exception("D1 Query Error: " . ($result['error'] ?? 'Unknown formatting error'));
+    }
+    
+    return $result['data'] ?? $result['info'];
+}
 function escape_like_search($search) {
     return str_replace(['\\', '%', '_'],['\\\\', '\%', '\_'], $search);
 }
@@ -1530,6 +1671,7 @@ try {
                 send_response('error', ['message' => 'يجب تسجيل الدخول أولاً لإتمام الطلب.'], 401);
             }
             
+            // 1. نظام منع التكرار (Idempotency)
             $idempotency_key = sanitize_input($input['idempotency_key'] ?? '');
             if (!empty($idempotency_key)) {
                 try {
@@ -1546,12 +1688,11 @@ try {
                     }
                     $pdo->prepare("INSERT INTO idempotency_keys (key_token, response_data) VALUES (?, 'processing')")->execute([$idempotency_key]);
                 } catch (PDOException $e) {
-                    if ($e->getCode() == 23000) {
-                        send_response('success', ['message' => 'تم استلام طلبك بنجاح (تم تجاهل الطلب المكرر).']);
-                    }
+                    if ($e->getCode() == 23000) send_response('success', ['message' => 'تم استلام طلبك بنجاح (تم تجاهل الطلب المكرر).']);
                 }
             }
 
+            // 2. معالجة بيانات الزبون والموقع الجغرافي
             $allowed_customer_keys = ['name', 'address', 'gps'];
             $c_data = filter_allowed_keys($input['customer'] ?? [], $allowed_customer_keys);
             
@@ -1567,9 +1708,7 @@ try {
             }
             
             $details_part = strip_tags($details_part);
-            if (mb_strlen($details_part, 'UTF-8') > 255) {
-                $details_part = mb_substr($details_part, 0, 252, 'UTF-8') . '...';
-            }
+            if (mb_strlen($details_part, 'UTF-8') > 255) $details_part = mb_substr($details_part, 0, 252, 'UTF-8') . '...';
             $details_part = sanitize_input($details_part);
 
             $stmt_cust = $pdo->prepare("SELECT full_name, address, phone FROM customers WHERE id = ?");
@@ -1586,32 +1725,23 @@ try {
                 $final_address = $cust_db['address']; 
             }
 
-            if (empty($final_name) || strpos($final_name, 'عميل') === 0) {
-                throw new Exception("يجب إدخال اسمك الحقيقي في حسابك أولاً لإتمام الطلب.");
-            }
-            if (empty($final_address) || strpos($final_address, 'http') === false) {
-                throw new Exception("الرجاء تحديد عنوان التوصيل الدقيق على الخريطة وكتابة وصف للموقع 📍");
-            }
+            if (empty($final_name) || strpos($final_name, 'عميل') === 0) throw new Exception("يجب إدخال اسمك الحقيقي في حسابك أولاً لإتمام الطلب.");
+            if (empty($final_address) || strpos($final_address, 'http') === false) throw new Exception("الرجاء تحديد عنوان التوصيل الدقيق على الخريطة وكتابة وصف للموقع 📍");
             
             $customer_coords = extract_coords_from_url($customer_gps_link);
-            if (!$customer_coords) {
-                throw new Exception("الرجاء تحديد موقع دقيق على الخريطة لتتمكن من إتمام الطلب.");
-            }
+            if (!$customer_coords) throw new Exception("الرجاء تحديد موقع دقيق على الخريطة لتتمكن من إتمام الطلب.");
 
             $dist_from_center = calculate_distance(ALLOWED_DELIVERY_CENTER_LAT, ALLOWED_DELIVERY_CENTER_LNG, $customer_coords['lat'], $customer_coords['lng']);
-            if ($dist_from_center > MAX_ALLOWED_DELIVERY_RADIUS_KM) {
-                throw new Exception("عذراً، موقعك يقع خارج نطاق التغطية المسموح لخدمة التوصيل.");
-            }
+            if ($dist_from_center > MAX_ALLOWED_DELIVERY_RADIUS_KM) throw new Exception("عذراً، موقعك يقع خارج نطاق التغطية المسموح لخدمة التوصيل.");
 
+            // 3. التحقق المبدئي من السلة
             $cart_items = $input['local_cart'] ?? [];
-            if (!is_array($cart_items)) $cart_items = [];
-            if (empty($cart_items)) throw new Exception('سلة المشتريات فارغة أو تم إرسال الطلب بالفعل!');
+            if (!is_array($cart_items) || empty($cart_items)) throw new Exception('سلة المشتريات فارغة أو تم إرسال الطلب بالفعل!');
 
             $MIN_CART_VALUE = 1000; 
             $MAX_QTY_PER_ITEM = 50; 
             $MAX_TOTAL_QTY = 200;   
 
-            $actual_cart_total = 0;
             $total_requested_qty = 0;
             $grouped_by_merchant = [];
 
@@ -1627,10 +1757,9 @@ try {
                 $grouped_by_merchant[$m_id][] = $c_item;
             }
 
-            if ($total_requested_qty > $MAX_TOTAL_QTY) {
-                throw new Exception("تجاوزت الحد الأقصى لإجمالي المنتجات المسموح بها في الطلب الواحد ({$MAX_TOTAL_QTY} قطعة).");
-            }
+            if ($total_requested_qty > $MAX_TOTAL_QTY) throw new Exception("تجاوزت الحد الأقصى لإجمالي المنتجات المسموح بها في الطلب الواحد.");
 
+            // 4. حساب رسوم التوصيل
             $total_delivery_fee = 1500; 
             $merchant_locations = [];
             $merchant_details = [];
@@ -1645,9 +1774,7 @@ try {
                 $merchant_details[$m_id] = $m_info;
                 $m_settings = json_decode($m_info['settings'] ?: '{}', true);
                 $m_coords = extract_coords_from_url($m_settings['location'] ?? null);
-                if ($m_coords) {
-                    $merchant_locations[$m_id] = $m_coords;
-                }
+                if ($m_coords) $merchant_locations[$m_id] = $m_coords;
             }
 
             if ($customer_coords && count($merchant_locations) > 0) {
@@ -1660,8 +1787,7 @@ try {
                 $route_distance += calculate_distance($last_merchant['lat'], $last_merchant['lng'], $customer_coords['lat'], $customer_coords['lng']);
                 
                 $calculated_base_fee = calculate_delivery_fee($route_distance);
-                $extra_stops = count($grouped_by_merchant) - 1;
-                $total_delivery_fee = $calculated_base_fee + ($extra_stops * 300);
+                $total_delivery_fee = $calculated_base_fee + ((count($grouped_by_merchant) - 1) * 300);
             } else {
                 $total_delivery_fee = 1500 + ((count($grouped_by_merchant) - 1) * 500);
             }
@@ -1671,12 +1797,28 @@ try {
             $prepared_sub_orders = [];
             $overall_cart_total = 0;
 
+            // ========================================================
+            // 5. التحقق الصارم من الأسعار والمخزون عبر Cloudflare D1
+            // ========================================================
             foreach ($grouped_by_merchant as $merchant_id => $items) {
                 $m_info = $merchant_details[$merchant_id];
-                $m_username = $m_info['username'];
                 $m_settings = json_decode($m_info['settings'] ?: '{}', true);
                 
-                $fb_products = fb_request("stores/$m_username/products.json") ?: [];
+                // جلب المنتجات الحقيقية من D1 بناءً على Merchant ID
+                $product_ids = array_map(function($i) { return $i['product_id'] ?? $i['listing_id']; }, $items);
+                $placeholders = implode(',', array_fill(0, count($product_ids), '?'));
+                $params = array_merge([$merchant_id], $product_ids);
+                
+                // استعلام D1
+                $d1_sql = "SELECT * FROM products WHERE merchant_id = ? AND id IN ($placeholders)";
+                $d1_results = d1_request($d1_sql, $params);
+                
+                // تحويل النتائج لمصفوفة يسهل البحث فيها
+                $d1_products = [];
+                foreach($d1_results as $row) {
+                    $row['options'] = json_decode($row['options'] ?? '[]', true) ?: [];
+                    $d1_products[$row['id']] = $row;
+                }
                 
                 $order_items_array = [];
                 $total_products_price = 0;
@@ -1686,12 +1828,12 @@ try {
                 foreach ($items as $item) {
                     $product_id = $item['product_id'] ?? $item['listing_id'];
                     
-                    if (!isset($fb_products[$product_id])) {
+                    if (!isset($d1_products[$product_id])) {
                         throw new Exception("المنتج '{$item['name']}' نفد أو تم حذفه من متجر {$m_info['store_name']}.");
                     }
                     
-                    $product = $fb_products[$product_id];
-                    if ($product['is_available'] == 0 || $product['is_available'] === false) {
+                    $product = $d1_products[$product_id];
+                    if ($product['is_available'] == 0) {
                         throw new Exception("المنتج '{$product['name']}' غير متاح حالياً للطلب.");
                     }
 
@@ -1704,13 +1846,15 @@ try {
                     $item_option_id = $item['size_id'] ?? null;
                     $option_info = null;
                     $item_image = $product['image'];
-                    $base_price = (float)$product['price'];
+                    $base_price = (float)$product['price']; // السعر الحقيقي من السيرفر
 
+                    // معالجة الخيارات (Sizes/Colors)
                     if ($item_option_id && !empty($product['options'])) {
                         $found_opt = false;
                         foreach ($product['options'] as $opt) {
                             if (isset($opt['id']) && $opt['id'] === $item_option_id) {
                                 $option_info = $opt['name'] ?? null;
+                                // تحديث السعر إذا كان الخيار له سعر مختلف
                                 if (isset($opt['custom_price']) && $opt['custom_price'] !== null && $opt['custom_price'] !== '') {
                                     $base_price = (float)$opt['custom_price'];
                                 }
@@ -1732,6 +1876,7 @@ try {
                         throw new Exception("عذراً، الكمية المطلوبة من '{$product['name']}' غير كافية بالمخزون (المتاح: {$available_qty}).");
                     }
 
+                    // حساب السعر النهائي بعد الخصم المسجل في السيرفر
                     $final_secure_price = $base_price * (1 - ((float)($product['discount'] ?? 0) / 100));
                     $total_products_price += ($final_secure_price * $qty);
                     
@@ -1746,25 +1891,22 @@ try {
                         'cost_price' => $product['cost_price'] ?? 0,
                         'image' => $item_image,
                         'qty_type' => $qty_type,
-                        'current_db_qty' => $product['quantity'] ?? 0,
+                        'current_db_qty' => $available_qty,
                         'options_raw' => $product['options'] ?? []
                     ];
                 }
 
                 $overall_cart_total += $total_products_price;
 
+                // حساب التوصيل المجاني إن وجد
                 $actual_delivery_fee = $fee_per_order;
                 if (isset($m_settings['free_shipping_enabled']) && ($m_settings['free_shipping_enabled'] === true || $m_settings['free_shipping_enabled'] === 'true')) {
                     $f_type = $m_settings['free_shipping_type'] ?? 'always';
                     $f_thresh = (float)($m_settings['free_shipping_threshold'] ?? 0);
                     
-                    if ($f_type === 'always') {
-                        $actual_delivery_fee = 0;
-                    } elseif ($f_type === 'order_value' && $total_products_price >= $f_thresh) {
-                        $actual_delivery_fee = 0;
-                    } elseif ($f_type === 'item_count' && $merchant_item_count >= $f_thresh) {
-                        $actual_delivery_fee = 0;
-                    }
+                    if ($f_type === 'always') $actual_delivery_fee = 0;
+                    elseif ($f_type === 'order_value' && $total_products_price >= $f_thresh) $actual_delivery_fee = 0;
+                    elseif ($f_type === 'item_count' && $merchant_item_count >= $f_thresh) $actual_delivery_fee = 0;
                 }
 
                 $grand_total = ($currency === 'YER') ? ($total_products_price + $actual_delivery_fee) : $total_products_price;
@@ -1790,6 +1932,9 @@ try {
             $is_order_merged = false;
             $created_tickets = [];
 
+            // ========================================================
+            // 6. إنشاء الطلب في (TiDB)
+            // ========================================================
             try {
                 $pdo->beginTransaction();
 
@@ -1800,6 +1945,7 @@ try {
                     $m_info = $sub_order['merchant_info'];
                     $m_username = $m_info['username'];
                     
+                    // البحث عن طلب معلق سابق لنفس التاجر لدمجه (وفر رسوم التوصيل)
                     $stmt_check_pending = $pdo->prepare(
                         "SELECT ticket_id, ticket_data, status 
                          FROM live_tickets 
@@ -1818,7 +1964,6 @@ try {
                         foreach ($sub_order['items'] as $new_item) {
                             $found = false;
                             foreach ($old_items as &$o_item) {
-                                // ⭐ إصلاح برمجي: استبدال String() بـ (string) متوافق مع PHP
                                 if ((string)$o_item['product_id'] === (string)$new_item['product_id'] && (string)($o_item['size_id'] ?? '') === (string)($new_item['size_id'] ?? '')) {
                                     $o_item['quantity'] += $new_item['quantity'];
                                     $found = true;
@@ -1909,53 +2054,71 @@ try {
                 throw $e;
             }
 
+            // ========================================================
+            // 7. خصم المخزون من D1 وإرسال الطلبات لـ Firebase (Post-Processing)
+            // ========================================================
             try {
                 foreach ($created_tickets as $tick) {
                     $m_username = $tick['merchant_username'];
                     $m_id = $tick['merchant_id'];
+                    $fb_products_update = kv_request("stores/$m_username/products") ?: []; // لعمل تزامن للـ KV/Firebase لاحقاً
                     
                     foreach ($tick['original_items_to_deduct'] as $item) {
                         $pid = $item['product_id'];
+                        
                         if ($item['qty_type'] === 'tracked') {
                             if ($item['size_id']) {
+                                // معالجة الخيارات المتعددة JSON
                                 $options_array = $item['options_raw'];
+                                $total_remaining_qty = 0;
+                                
                                 foreach ($options_array as &$opt) {
                                     if (isset($opt['id']) && $opt['id'] === $item['size_id']) {
                                         $opt['quantity'] = max(0, $opt['quantity'] - $item['quantity']);
-                                        break;
                                     }
+                                    $total_remaining_qty += (int)($opt['quantity'] ?? 0);
                                 }
                                 unset($opt);
                                 
-                                $total_remaining_qty = 0;
-                                foreach ($options_array as $opt) {
-                                    $total_remaining_qty += (int)($opt['quantity'] ?? 0);
-                                }
+                                $opts_json = json_encode($options_array, JSON_UNESCAPED_UNICODE);
                                 
-                                fb_request("stores/$m_username/products/$pid.json", 'PATCH', [
-                                    'quantity' => $total_remaining_qty,
-                                    'options' => $options_array,
-                                    'updated_at' => time()
-                                ]);
+                                // تحديث D1 للخيارات
+                                d1_request("UPDATE products SET quantity = ?, options = ?, updated_at = ? WHERE id = ? AND merchant_id = ?",
+                                    [$total_remaining_qty, $opts_json, time(), $pid, $m_id]);
+                                    
+                                // تجهيز بيانات المزامنة    
+                                if(isset($fb_products_update[$pid])) {
+                                    $fb_products_update[$pid]['quantity'] = $total_remaining_qty;
+                                    $fb_products_update[$pid]['options'] = $options_array;
+                                }
                             } else {
-                                $new_qty = max(0, $item['current_db_qty'] - $item['quantity']);
-                                fb_request("stores/$m_username/products/$pid.json", 'PATCH', [
-                                    'quantity' => $new_qty,
-                                    'updated_at' => time()
-                                ]);
+                                // تحديث D1 للمنتج العادي
+                                d1_request("UPDATE products SET quantity = quantity - ?, updated_at = ? WHERE id = ? AND merchant_id = ?",
+                                    [$item['quantity'], time(), $pid, $m_id]);
+                                    
+                                if(isset($fb_products_update[$pid])) {
+                                    $fb_products_update[$pid]['quantity'] = max(0, $item['current_db_qty'] - $item['quantity']);
+                                }
                             }
                         }
                     }
 
+                    // تحديث KV / Firebase لتبقى واجهة الزبائن الحالية محدثة
+                   kv_request("stores/$m_username/products", 'PUT', $fb_products_update);
+// تحديث مستودع GitHub بعد خصم المنتجات
+sync_to_github("stores/$m_username/products.json", $fb_products_update, 'PUT', "Stock auto-deduction for order");
+update_kv_manifest($m_username);
+
+                    // دفع الطلب إلى Firebase ليظهر في لوحة التاجر الحية
                     $merchant_secret_hash = md5($m_id . APP_SECRET_KEY . 'orders');
-                    
                     $fb_order_data = $tick['ticket_data'];
                     $fb_order_data['id'] = $tick['ticket_id'];
                     $fb_order_data['status'] = $tick['status'];
                     $fb_order_data['created_at'] = date('Y-m-d H:i:s');
                     
-                    fb_request("stores/$m_username/secure_active_orders/$merchant_secret_hash/{$tick['ticket_id']}.json", 'PUT', $fb_order_data);
+                    sync_to_firebase($m_username, "secure_active_orders/$merchant_secret_hash", $tick['ticket_id'], $fb_order_data, 'PUT');
                     
+                    // 8. إرسال الإشعارات (Push & SMS)
                     $stmt_m_info = $pdo->prepare("SELECT phone, store_name, settings FROM users WHERE id = ?");
                     $stmt_m_info->execute([$m_id]);
                     $m_info_db = $stmt_m_info->fetch(PDO::FETCH_ASSOC);
@@ -1983,10 +2146,12 @@ try {
                         }
                     }
                 }
-            } catch (Exception $fb_error) {
-                error_log("Firebase post-order sync failed: " . $fb_error->getMessage());
+            } catch (Exception $sync_error) {
+                // الأخطاء هنا لا توقف العملية لأن الطلب تم حفظه في قاعدة البيانات (TiDB)
+                error_log("D1/Firebase post-order sync failed: " . $sync_error->getMessage());
             }
 
+            // 9. الاستجابة النهائية للزبون
             $success_msg = $is_order_merged ? 'تم دمج المنتجات الجديدة لطلبك السابق بنجاح! 🛍️' : 'تم استلام طلبك وبانتظار موافقة التاجر لتجهيزه!';
             $response_data = ['message' => $success_msg];
 
@@ -1996,17 +2161,15 @@ try {
             }
 
             foreach ($created_tickets as $tick) {
-                $m_id = $tick['merchant_id'];
-                $ticket_id_to_send = $tick['ticket_id'];
-                
                 $stmt_get_token = $pdo->prepare("SELECT fcm_token FROM users WHERE id = ?");
-                $stmt_get_token->execute([$m_id]);
+                $stmt_get_token->execute([$tick['merchant_id']]);
                 $merchant_fcm_token = $stmt_get_token->fetchColumn();
 
                 if ($merchant_fcm_token) {
-                    send_silent_push_to_merchant($merchant_fcm_token, $ticket_id_to_send);
+                    send_silent_push_to_merchant($merchant_fcm_token, $tick['ticket_id']);
                 }
             }
+            
             send_response('success', $response_data);
             break;
 
@@ -3099,27 +3262,32 @@ try {
             send_response('success',['number' => $num]);
             break;
 
-        case 'save_product':
-            if (!$user_id) send_response('error',['message' => 'غير مصرح'], 401);
-            
-            $merchant_username = $_SESSION['username'] ?? '';
-            if (!$merchant_username) {
-                // ⭐ تعديل أمني: استعلام مجهز لتأمين جلب اسم المستخدم للتاجر
-                $merchant_username = get_username_by_id($pdo, $user_id);
+       case 'save_product':
+            // 1. التحقق من الصلاحيات (يجب أن يكون تاجراً مسجل الدخول)
+            if (!$user_id || $user_role !== 'merchant') {
+                send_response('error', ['message' => 'غير مصرح لك بإضافة أو تعديل المنتجات.'], 401);
             }
-
-            $idempotency_key = sanitize_input($_POST['idempotency_key'] ?? '');
-            $pid = !empty($_POST['id']) ? sanitize_input($_POST['id']) : null;
-            $is_edit = !empty($pid);
             
+            // 2. تنظيف المدخلات وتحديد هل هي إضافة أم تعديل
+            $pid = !empty($_POST['id']) ? sanitize_input($_POST['id']) : 'prod_' . generate_uuid();
+            $is_edit = !empty($_POST['id']);
+            
+            // حماية الأسعار والكميات (إجبارها لتكون أرقام فقط لمنع التلاعب)
             $sell_price = floatval($_POST['price'] ?? 0);
             $cost_price = floatval($_POST['cost_price'] ?? 0);
             $currency = sanitize_input($_POST['currency'] ?? 'YER');
             $discount_percent = floatval($_POST['discount'] ?? 0);
+            
             $quantity_type = sanitize_input($_POST['quantity_type'] ?? 'tracked');
             $quantity = ($quantity_type === 'unlimited') ? 9999 : (int)($_POST['quantity'] ?? 0);
             $is_available = (!empty($_POST['isAvailable']) || $_POST['isAvailable'] === 'on' || $_POST['isAvailable'] === 'true' || $_POST['isAvailable'] == 1) ? 1 : 0;
             
+            // تنظيف النصوص
+            $name = sanitize_input($_POST['name'] ?? '');
+            $desc = sanitize_input($_POST['mainDescription'] ?? '');
+            $options = $_POST['sizes'] ?? '[]'; // يُحفظ كنص JSON
+            
+            // 3. معالجة التصنيف (القسم)
             $category_id_input = sanitize_input($_POST['category_id'] ?? '');
             $category_name = 'عام';
             if (strpos($category_id_input, 'NEW_CAT:') === 0) {
@@ -3131,18 +3299,17 @@ try {
                 $category_name = $stmt_cat->fetchColumn() ?: 'عام';
             }
 
+            // 4. رفع الصورة بأمان (باستخدام ImgBB كما في نظامك)
             $img = sanitize_input($_POST['existing_image'] ?? '');
             if (isset($_FILES['image_file']) && $_FILES['image_file']['error'] === UPLOAD_ERR_OK) {
-                // ⭐ مراجعة أمنية: التحقق من نوع وحجم الملف قبل رفعه
+                // دالة فحص أمان الصورة (موجودة في ملفك)
                 $validation_result = validate_image_upload($_FILES['image_file']);
                 if ($validation_result !== true) {
                     throw new Exception($validation_result);
                 }
 
                 $env_keys = getenv('IMGBB_KEYS') ?: $_ENV['IMGBB_KEYS'] ?? '';
-                if (empty($env_keys)) {
-                    throw new Exception("مفتاح رفع الصور (IMGBB_KEYS) مفقود من إعدادات السيرفر.");
-                }
+                if (empty($env_keys)) throw new Exception("مفتاح رفع الصور مفقود من إعدادات السيرفر.");
                 
                 $keys_array = array_map('trim', explode(',', $env_keys));
                 $api_key = $keys_array[array_rand($keys_array)]; 
@@ -3163,32 +3330,73 @@ try {
                     throw new Exception("فشل رفع الصورة لمركز الرفع.");
                 }
             }
+            
             if (empty($img)) throw new Exception("يجب توفير صورة للمنتج.");
 
-            if (!$is_edit) {
-                if ($sell_price <= $cost_price) throw new Exception('سعر البيع يجب أن يكون أعلى من التكلفة.');
-                $pid = 'prod_' . generate_uuid();
-            } else {
-                $existing_check = kv_request("stores/$merchant_username/products");
-                if (!$existing_check || !isset($existing_check[$pid])) {
-                    throw new Exception("المنتج غير موجود أو لا تملكه.");
-                }
+            // 5. قواعد الحماية المالية
+            if (!$is_edit && $sell_price <= $cost_price) {
+                throw new Exception('سعر البيع يجب أن يكون أعلى من التكلفة.');
             }
 
+            // ========================================================
+            // 6. الحفظ في Cloudflare D1 بأمان تام
+            // ========================================================
+            if ($is_edit) {
+                // في حالة التعديل: نستخدم UPDATE ونشترط أن merchant_id يطابق التاجر الحالي (مستحيل يعدل منتج غيره)
+                $sql = "UPDATE products SET 
+                        name = ?, description = ?, price = ?, cost_price = ?, discount = ?, 
+                        image = ?, type = ?, options = ?, quantity = ?, quantity_type = ?, 
+                        is_available = ?, currency = ?, updated_at = ?
+                        WHERE id = ? AND merchant_id = ?";
+                
+                $params = [
+                    $name, $desc, $sell_price, $cost_price, $discount_percent, 
+                    $img, $category_name, $options, $quantity, $quantity_type, 
+                    $is_available, $currency, time(),
+                    $pid, $user_id
+                ];
+                
+                $result = d1_request($sql, $params);
+                
+                // تحقق مما إذا تم التعديل فعلاً
+                if (isset($result['changes']) && $result['changes'] == 0) {
+                    throw new Exception("لم يتم التعديل. المنتج غير موجود أو لا تملك صلاحية تعديله.");
+                }
+
+            } else {
+                // في حالة الإضافة الجديدة: نستخدم INSERT
+                $sql = "INSERT INTO products 
+                        (id, merchant_id, name, description, price, cost_price, discount, image, type, options, quantity, quantity_type, is_available, currency, updated_at) 
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+                
+                $params = [
+                    $pid, $user_id, $name, $desc, $sell_price, $cost_price, $discount_percent, 
+                    $img, $category_name, $options, $quantity, $quantity_type, $is_available, $currency, time()
+                ];
+                
+                d1_request($sql, $params);
+                
+            }
+
+            // ========================================================
+            // 7. مزامنة احتياطية لـ KV (لضمان عمل واجهة الزبائن الحالية بدون أعطال)
+            // ========================================================
+            $merchant_username = $_SESSION['username'] ?? get_username_by_id($pdo, $user_id);
             $store_name = $_SESSION['store_name'] ?? get_store_name_by_id($pdo, $user_id);
-            
-            $product_data = [
+
+            $current_products = kv_request("stores/$merchant_username/products") ?: [];
+            $current_products[$pid] = [
                 'id' => $pid,
                 'global_product_id' => $pid,
-                'name' => sanitize_input($_POST['name']),
-                'mainDescription' => sanitize_input($_POST['mainDescription']),
+                'name' => $name,
+                'mainDescription' => $desc,
                 'price' => $sell_price,
                 'cost_price' => $cost_price,
                 'discount' => $discount_percent,
                 'image' => $img,
                 'type' => $category_name,
                 'category_id' => $category_id_input,
-                'options' => json_decode($_POST['sizes'] ?? '[]', true) ?: [],
+                'options' => json_decode($options, true) ?: [],
                 'quantity' => $quantity,
                 'quantity_type' => $quantity_type,
                 'is_available' => $is_available,
@@ -3198,14 +3406,18 @@ try {
                 'merchant_name' => $store_name,
                 'updated_at' => time()
             ];
-
-            $current_products = kv_request("stores/$merchant_username/products") ?: [];
-            $current_products[$pid] = $product_data;
             
             kv_request("stores/$merchant_username/products", 'PUT', $current_products);
-            update_kv_manifest($merchant_username);
+// مزامنة فورية إلى GitHub كمستودع JSON
+sync_to_github("stores/$merchant_username/products.json", $current_products, 'PUT', "Add/Update product $pid");
+update_kv_manifest($merchant_username);
+purge_jsdelivr_cache($merchant_username);
             
-            send_response('success', ['message' => $is_edit ? 'تم التحديث بنجاح.' : 'تم الحفظ بنجاح.', 'id' => $pid]);
+            // 8. إرجاع استجابة النجاح
+            send_response('success', [
+                'message' => $is_edit ? 'تم تحديث المنتج بأمان في D1.' : 'تم إضافة المنتج بأمان إلى D1.', 
+                'id' => $pid
+            ]);
             break;
       
         case 'force_sync_to_firebase':
@@ -3354,30 +3566,25 @@ try {
             break;
 
         case 'list_products':
-        case 'search_products':
             if (!$user_id) send_response('error',['message' => 'غير مصرح'], 401);
             
-            // ⭐ تعديل أمني: استعلام مجهز لتأمين جلب اسم المستخدم للتاجر
-            $merchant_username = $_SESSION['username'] ?? get_username_by_id($pdo, $user_id);
             $term = strtolower(sanitize_input($input['term'] ?? ''));
             
-            $fb_products = kv_request("stores/$merchant_username/products");
-            $products = $fb_products ? array_values($fb_products) : [];
+            // جلب المنتجات للتاجر فقط
+            $sql = "SELECT * FROM products WHERE merchant_id = ? ORDER BY updated_at DESC";
+            $products = d1_request($sql, [$user_id]);
             
-            usort($products, function($a, $b) {
-                return ($b['updated_at'] ?? 0) <=> ($a['updated_at'] ?? 0);
-            });
+            // تحويل الـ JSON strings إلى مصفوفات
+            foreach($products as &$p) {
+                $p['options'] = json_decode($p['options'] ?? '[]', true);
+                if ($user_role === 'delivery') unset($p['cost_price']);
+            }
 
             if ($term) {
                 $products = array_filter($products, function($p) use ($term) {
-                    return strpos(strtolower($p['name']), $term) !== false || 
-                           strpos(strtolower($p['mainDescription'] ?? ''), $term) !== false;
+                    return strpos(strtolower($p['name']), $term) !== false;
                 });
                 $products = array_values($products); 
-            }
-
-            if ($user_role === 'delivery') {
-                foreach($products as &$p) { unset($p['cost_price']); }
             }
 
             send_response('success',['data' => $products]);
@@ -3405,41 +3612,7 @@ try {
             throw new Exception('المنتج غير موجود.');
             break;
 
-        case 'delete_product':
-            if (!$user_id) send_response('error', ['message' => 'غير مصرح'], 401);
-            $product_id = sanitize_input($input['id']);
-            
-            // ⭐ تعديل أمني: استعلام مجهز لتأمين جلب اسم المستخدم للتاجر
-            $merchant_username = $_SESSION['username'] ?? get_username_by_id($pdo, $user_id);
-
-            $search1 = '%"product_id":"' . $product_id . '"%'; 
-            $stmt_check = $pdo->prepare("SELECT ticket_id FROM live_tickets WHERE merchant_id = ? AND status IN ('pending_merchant_approval', 'confirmed_by_store', 'accepted_by_delivery', 'out_for_delivery') AND ticket_data LIKE ? LIMIT 1");
-            $stmt_check->execute([$user_id, $search1]);
-            
-            if ($stmt_check->fetch()) {
-                throw new Exception("لا يمكنك حذف هذا المنتج حالياً لأنه موجود ضمن طلب نشط للزبائن. قم بإنهاء الطلب أولاً.");
-            }
-
-            $pdo->prepare("DELETE FROM merchant_listings WHERE global_product_id = ? AND merchant_id = ?")->execute([$product_id, $user_id]);
-
-            fb_request("stores/$merchant_username/products/$product_id.json", 'DELETE');
-            update_kv_manifest($merchant_username);            
-            send_response('success',['message' => 'تم حذف المنتج نهائياً.']);
-            break;
-
-        case 'toggle_availability':
-            if (!$user_id) send_response('error',['message' => 'غير مصرح'], 401);
-            $product_id = sanitize_input($input['id']);
-            $req_status = (int)$input['isAvailable'];
-            
-            // ⭐ تعديل أمني: استعلام مجهز لتأمين جلب اسم المستخدم للتاجر
-            $merchant_username = $_SESSION['username'] ?? get_username_by_id($pdo, $user_id);
-
-            kv_request("stores/$merchant_username/products/$product_id", 'PATCH', ['is_available' => $req_status, 'updated_at' => time()]);
-            
-            send_response('success',['message' => 'تم تحديث حالة المنتج']);
-            break;
-
+        
         case 'review_product':
             if ($user_role !== 'admin') throw new Exception("غير مصرح. هذه الصلاحية للإدارة فقط.");
             
@@ -3466,76 +3639,179 @@ try {
             send_response('success',['message' => 'تم تحديث حالة مراجعة المنتج بنجاح.']);
             break;
 
-        case 'add_quantity':
-            if (!$user_id) send_response('error',['message' => 'غير مصرح'], 401);
-            $product_id = sanitize_input($input['productId']);
-            $qty_to_add = (int)$input['quantity'];
+ case 'delete_product':
+            if (!$user_id || $user_role !== 'merchant') send_response('error', ['message' => 'غير مصرح لك.'], 401);
+            $product_id = sanitize_input($input['id']);
             
-            // ⭐ تعديل أمني: استعلام مجهز لتأمين جلب اسم المستخدم للتاجر
             $merchant_username = $_SESSION['username'] ?? get_username_by_id($pdo, $user_id);
 
-            $product = kv_request("stores/$merchant_username/products/$product_id");
-            if (!$product) throw new Exception("المنتج غير موجود.");
-
-            $new_qty = (int)($product['quantity'] ?? 0) + $qty_to_add;
-            kv_request("stores/$merchant_username/products/$product_id", 'PATCH', ['quantity' => $new_qty, 'updated_at' => time()]);
+            // 1. فحص أمني: هل المنتج ضمن طلب نشط حالياً عند زبون؟ (نبحث في TiDB)
+            $search1 = '%"product_id":"' . $product_id . '"%'; 
+            $stmt_check = $pdo->prepare("SELECT ticket_id FROM live_tickets WHERE merchant_id = ? AND status IN ('pending_merchant_approval', 'confirmed_by_store', 'accepted_by_delivery', 'out_for_delivery') AND ticket_data LIKE ? LIMIT 1");
+            $stmt_check->execute([$user_id, $search1]);
             
-            send_response('success',['message' => 'تمت إضافة المخزون']);
+            if ($stmt_check->fetch()) {
+                throw new Exception("لا يمكنك حذف هذا المنتج حالياً لأنه موجود ضمن طلب نشط للزبائن. قم بإنهاء الطلب أو إلغائه أولاً.");
+            }
+
+            // 2. الحذف الآمن من Cloudflare D1 (نضمن أن التاجر يحذف منتجه فقط)
+            $sql = "DELETE FROM products WHERE id = ? AND merchant_id = ?";
+            d1_request($sql, [$product_id, $user_id]);
+
+            // 3. المزامنة: الحذف من واجهة KV لضمان تحديث متجر الزبائن
+            $current_products = kv_request("stores/$merchant_username/products") ?: [];
+            if (isset($current_products[$product_id])) {
+                unset($current_products[$product_id]);
+                kv_request("stores/$merchant_username/products", 'PUT', $current_products);
+// مزامنة تحديث الكمية في GitHub
+sync_to_github("stores/$merchant_username/products.json", $current_products, 'PUT', "Update stock for $product_id");
+update_kv_manifest($merchant_username);
+            }
+purge_jsdelivr_cache($merchant_username);            
+            // 4. الحذف من Firebase إن وجد
+            fb_request("stores/$merchant_username/products/$product_id.json", 'DELETE');
+            
+            send_response('success',['message' => 'تم حذف المنتج نهائياً بنجاح.']);
             break;
+      case 'toggle_availability':
+            if (!$user_id || $user_role !== 'merchant') send_response('error',['message' => 'غير مصرح'], 401);
+            
+            $product_id = sanitize_input($input['id']);
+            $req_status = (int)$input['isAvailable'] ? 1 : 0;
+            
+            $merchant_username = $_SESSION['username'] ?? get_username_by_id($pdo, $user_id);
+
+            // 1. تحديث الحالة في D1 بأمان
+            $sql = "UPDATE products SET is_available = ?, updated_at = ? WHERE id = ? AND merchant_id = ?";
+            d1_request($sql, [$req_status, time(), $product_id, $user_id]);
+
+            // 2. مزامنة الحالة مع واجهة KV (التخزين المؤقت للعملاء)
+            $current_products = kv_request("stores/$merchant_username/products") ?: [];
+            if (isset($current_products[$product_id])) {
+                $current_products[$product_id]['is_available'] = $req_status;
+                $current_products[$product_id]['updated_at'] = time();
+                kv_request("stores/$merchant_username/products", 'PUT', $current_products);
+sync_to_github("stores/$merchant_username/products.json", $current_products, 'PUT', "Toggle visibility for $product_id");
+update_kv_manifest($merchant_username);
+            }
+purge_jsdelivr_cache($merchant_username);            
+            send_response('success',['message' => 'تم تحديث حالة المنتج (إخفاء/إظهار) بنجاح.']);
+            break;
+           case 'add_quantity':
+            if (!$user_id || $user_role !== 'merchant') send_response('error',['message' => 'غير مصرح لك.'], 401);
+            
+            $product_id = sanitize_input($input['productId']);
+            $size_id = sanitize_input($input['sizeId'] ?? null);
+            $qty_to_add = (int)$input['quantity'];
+            
+            if ($qty_to_add <= 0) {
+                throw new Exception("يجب إدخال كمية صحيحة أكبر من الصفر.");
+            }
+            
+            $merchant_username = $_SESSION['username'] ?? get_username_by_id($pdo, $user_id);
+
+            // 1. سحب بيانات المنتج من D1 لضمان البيانات الحقيقية
+            $d1_products = d1_request("SELECT quantity, quantity_type, options FROM products WHERE id = ? AND merchant_id = ?", [$product_id, $user_id]);
+            if (empty($d1_products)) {
+                throw new Exception("المنتج غير موجود أو لا تملك صلاحية التعديل عليه.");
+            }
+            
+            $product = $d1_products[0];
+            if ($product['quantity_type'] !== 'tracked') {
+                throw new Exception("هذا المنتج غير محدود الكمية، لا حاجة لإضافة مخزون.");
+            }
+
+            $new_total_qty = $product['quantity'];
+            $new_options_json = $product['options'];
+
+            // 2. الحساب الآمن داخل السيرفر (تحديث المقاسات إن وجدت)
+            if (!empty($size_id)) {
+                $options = json_decode($product['options'] ?: '[]', true);
+                $found = false;
+                $new_total_qty = 0; // سنقوم بإعادة حساب المجموع الكلي
+                
+                foreach ($options as &$opt) {
+                    if (isset($opt['id']) && $opt['id'] === $size_id) {
+                        $opt['quantity'] = (int)($opt['quantity'] ?? 0) + $qty_to_add;
+                        $found = true;
+                    }
+                    $new_total_qty += (int)($opt['quantity'] ?? 0);
+                }
+                unset($opt); // تحرير الذاكرة
+                
+                if (!$found) throw new Exception("المقاس أو الخيار المحدد غير موجود ضمن هذا المنتج.");
+                
+                $new_options_json = json_encode($options, JSON_UNESCAPED_UNICODE);
+                
+                // تحديث D1 بالكمية الجديدة والخيارات الجديدة
+                $sql = "UPDATE products SET quantity = ?, options = ?, updated_at = ? WHERE id = ? AND merchant_id = ?";
+                d1_request($sql, [$new_total_qty, $new_options_json, time(), $product_id, $user_id]);
+                
+            } else {
+                // منتج عادي لا يحتوي خيارات
+                $sql = "UPDATE products SET quantity = quantity + ?, updated_at = ? WHERE id = ? AND merchant_id = ?";
+                d1_request($sql, [$qty_to_add, time(), $product_id, $user_id]);
+                $new_total_qty += $qty_to_add;
+            }
+
+            // 3. مزامنة التعديلات مع Cloudflare KV لكي يراه الزبائن فوراً
+            $current_products = kv_request("stores/$merchant_username/products") ?: [];
+            if (isset($current_products[$product_id])) {
+                $current_products[$product_id]['quantity'] = $new_total_qty;
+                if (!empty($size_id)) {
+                    $current_products[$product_id]['options'] = json_decode($new_options_json, true);
+                }
+                $current_products[$product_id]['updated_at'] = time();
+                kv_request("stores/$merchant_username/products", 'PUT', $current_products);
+                update_kv_manifest($merchant_username);
+            }
+purge_jsdelivr_cache($merchant_username);            
+            send_response('success',['message' => 'تمت إضافة الكمية للمخزون بنجاح ✅']);
+            break;              
 
         case 'process_sale':
-            if (!$user_id) send_response('error',['message' => 'غير مصرح'], 401);
+            if (!$user_id || $user_role !== 'merchant') send_response('error',['message' => 'غير مصرح'], 401);
+            
             $pid = sanitize_input($input['productId']); 
             $size_id = sanitize_input($input['sizeId'] ?? null); 
             $qty_to_sell = (int)$input['quantity'];
             
-            // ⭐ تعديل أمني: استعلام مجهز لتأمين جلب اسم المستخدم للتاجر
-            $merchant_username = $_SESSION['username'] ?? get_username_by_id($pdo, $user_id);
+            if ($qty_to_sell <= 0) throw new Exception("الكمية غير صالحة.");
 
-            try {
-                $pdo->beginTransaction();
-                
-                $product = kv_request("stores/$merchant_username/products/$pid");
-                if (!$product) throw new Exception("المنتج غير موجود.");
+            // 1. جلب بيانات المنتج من D1 (السعر والتكلفة الحقيقية من الداتا بيز)
+            $product_res = d1_request("SELECT * FROM products WHERE id = ? AND merchant_id = ?", [$pid, $user_id]);
+            if (empty($product_res)) throw new Exception("المنتج غير موجود أو لا تملكه.");
+            $product = $product_res[0];
 
-                if ($product['quantity_type'] === 'tracked') {
-                    if ($product['quantity'] < $qty_to_sell) throw new Exception("الكمية غير متوفرة في المخزون.");
-                    $new_qty = $product['quantity'] - $qty_to_sell;
-                    kv_request("stores/$merchant_username/products/$pid", 'PATCH', ['quantity' => $new_qty]);
-                }
-
-                $price = $product['price'] * (1 - (($product['discount']??0)/100)); 
-                if ($size_id) {
-                    foreach($product['options'] as $opt) {
-                        if($opt['id'] == $size_id && isset($opt['custom_price'])) $price = $opt['custom_price'];
-                    }
-                }
-                
-                $total = $price * $qty_to_sell; 
-                $cost = ($product['cost_price']??0) * $qty_to_sell; 
-                $sid = 'SALE-' . generate_uuid();
-                
-                $pdo->prepare("INSERT INTO sales_log (id, user_id, product_id, size_id, quantity, price_per_item, total_price, currency, type, cost_at_sale) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'sale', ?)")->execute([$sid, $user_id, $pid, $size_id, $qty_to_sell, $price, $total, $product['currency'], $cost]);
-                
-                $pdo->commit();
-                send_response('success',['message' => 'تمت العملية', 'saleId' => $sid]);
-            } catch (Exception $e) { if ($pdo->inTransaction()) $pdo->rollBack(); throw $e; }
-            break;
-
-        case 'get_invoice_details':
-            if (!$user_id) send_response('error',['message' => 'غير مصرح'], 401);
-            $sql = "SELECT s.id, s.quantity, s.price_per_item, s.total_price, s.currency, s.type, s.timestamp, s.size_id, p.name as productName, p.sizes FROM sales_log s JOIN products p ON s.product_id = p.id WHERE s.id = ?";
-            $params = [sanitize_input($input['id'])];
-            if ($user_role === 'merchant' || $user_role === 'delivery') { $sql .= " AND s.user_id = ?"; $params[] = $user_id; }
-            $stmt = $pdo->prepare($sql); $stmt->execute($params); $sale = $stmt->fetch(PDO::FETCH_ASSOC);
-            if ($sale) {
-                if ($sale['size_id'] && $sale['sizes']) { $options = json_decode($sale['sizes'], true); if(is_array($options)) { foreach($options as $option) { if (isset($option['id']) && $option['id'] === $sale['size_id']) { $sale['size_name'] = $option['name'] ?? ($option['size_name'] ?? ''); break; } } } }
-                unset($sale['sizes']);
-                $settings = $pdo->query("SELECT setting_value FROM settings WHERE setting_key = 'store_settings'")->fetchColumn();
-                $storeName = json_decode($settings, true)['storeName'] ?? 'المتجر';
-                send_response('success',['data' =>['sale' => $sale, 'storeName' => $storeName]]);
+            if ($product['quantity_type'] === 'tracked' && $product['quantity'] < $qty_to_sell) {
+                throw new Exception("الكمية غير متوفرة في المخزون.");
             }
-            throw new Exception("الفاتورة غير موجودة");
+
+            // 2. حساب السعر الحقيقي الخالي من التلاعب
+            $price = $product['price'] * (1 - (($product['discount']??0)/100)); 
+            $options = json_decode($product['options'] ?? '[]', true);
+            if ($size_id && is_array($options)) {
+                foreach($options as $opt) {
+                    if($opt['id'] == $size_id && isset($opt['custom_price'])) $price = $opt['custom_price'];
+                }
+            }
+            
+            $total = $price * $qty_to_sell; 
+            $cost = ($product['cost_price']??0) * $qty_to_sell; 
+            $sid = 'SALE-' . generate_uuid();
+            
+            // 3. خصم الكمية من D1 بأمان (عملية ذرية Atomic)
+            if ($product['quantity_type'] === 'tracked') {
+                d1_request("UPDATE products SET quantity = quantity - ? WHERE id = ? AND merchant_id = ? AND quantity >= ?", 
+                           [$qty_to_sell, $pid, $user_id, $qty_to_sell]);
+            }
+            
+            // 4. تسجيل المبيعات في D1
+            d1_request("INSERT INTO sales_log (id, user_id, product_id, size_id, quantity, price_per_item, total_price, currency, cost_at_sale) 
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", 
+                        [$sid, $user_id, $pid, $size_id, $qty_to_sell, $price, $total, $product['currency'], $cost]);
+            
+            send_response('success',['message' => 'تمت العملية وتحديث المخزون في D1 بنجاح', 'saleId' => $sid]);
             break;
             
         case 'get_returnable_sales':
@@ -4112,6 +4388,9 @@ try {
                                     'options' => $options_array,
                                     'updated_at' => time()
                                 ]);
+                                // يتم إضافته بعد انتهاء حلقة foreach التي تعدل المنتجات 
+$updated_products = kv_request("stores/$merchant_username/products") ?: [];
+sync_to_github("stores/$merchant_username/products.json", $updated_products, 'PUT', "Restock products from cancelled order");
                             } else {
                                 $new_qty = (int)($product['quantity'] ?? 0) + $qty;
                                 
@@ -4191,7 +4470,9 @@ try {
                 'store_type' => $storeType ?: $user_record['store_type'],
                 'settings' => $final_settings
             ];
-            sync_to_firebase($merchant_username, 'info', null, $fb_settings, 'PUT');           
+            sync_to_firebase($merchant_username, 'info', null, $fb_settings, 'PUT');        
+            sync_to_github("stores/$merchant_username/info.json", $fb_settings, 'PUT', "Update store settings");
+            purge_jsdelivr_cache($merchant_username);   
             $json_settings = json_encode($final_settings, JSON_UNESCAPED_UNICODE);
             
             update_kv_manifest($merchant_username);            
