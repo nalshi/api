@@ -558,6 +558,14 @@ function d1_request($sql, $params = []) {
         throw new Exception("CRITICAL ERROR: D1 Worker configuration is missing in Render Environment.");
     }
     
+    // ==========================================================
+    // 💡 الإصلاح هنا: إجبار الرابط على التوجه لمسار /api/sql
+    // ==========================================================
+    $d1_url = rtrim($d1_url, '/');
+    if (strpos($d1_url, '/api/sql') === false) {
+        $d1_url .= '/api/sql';
+    }
+    
     $ch = curl_init($d1_url);
     curl_setopt($ch, CURLOPT_CUSTOMREQUEST, 'POST');
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
