@@ -58,7 +58,7 @@ $allowed_origins = [
     'https://nnny.pages.dev',
     'https://api-ylin.onrender.com', // السماح لسيرفر Render نفسه
     'http://localhost',
-    'https://ny-rosy-three.vercel.app'
+    'http://127.0.0.1'
 ];
 
 $request_origin = $_SERVER['HTTP_ORIGIN'] ?? '';
@@ -524,51 +524,74 @@ function trigger_cache_rebuild($merchant_id) {
 }
 
 function d1_request($sql, $params = []) {
-    // جلب القيم من Render فقط!
-    $d1_url = getenv('WORKER_D1_URL') ?: $_SERVER['WORKER_D1_URL'] ?? '';
-    $d1_secret = getenv('WORKER_SECRET') ?: $_SERVER['WORKER_SECRET'] ?? ''; 
+    // 1. جلب بيانات الاعتماد مباشرة من بيئة العمل (Environment Variables) لضمان السرية التامة
+    $account_id  = getenv('CLOUDFLARE_ACCOUNT_ID') ?: $_ENV['CLOUDFLARE_ACCOUNT_ID'] ?? '';
+    $database_id = getenv('CLOUDFLARE_DATABASE_ID') ?: $_ENV['CLOUDFLARE_DATABASE_ID'] ?? '';
+    $api_token   = getenv('CLOUDFLARE_API_TOKEN') ?: $_ENV['CLOUDFLARE_API_TOKEN'] ?? '';
     
-    // إيقاف النظام فوراً إذا لم تكن القيم موجودة في Render
-    if (empty($d1_url) || empty($d1_secret)) {
-        throw new Exception("CRITICAL ERROR: D1 Worker configuration is missing in Render Environment.");
+    if (empty($account_id) || empty($database_id) || empty($api_token)) {
+        throw new Exception("خطأ أمني حرج: بيانات الاتصال المباشر بـ Cloudflare D1 غير مكتملة في متغيرات البيئة.");
     }
     
-    // ==========================================================
-    // 💡 الإصلاح هنا: إجبار الرابط على التوجه لمسار /api/sql
-    // ==========================================================
-    $d1_url = rtrim($d1_url, '/');
-    if (strpos($d1_url, '/api/sql') === false) {
-        $d1_url .= '/api/sql';
-    }
+    // 2. تحديد المسار الرسمي لـ Cloudflare D1 Query API
+    $url = "https://api.cloudflare.com/client/v4/accounts/" . trim($account_id) . "/d1/database/" . trim($database_id) . "/query";
     
-    $ch = curl_init($d1_url);
+    // 3. تجهيز طلب cURL الآمن
+    $ch = curl_init($url);
     curl_setopt($ch, CURLOPT_CUSTOMREQUEST, 'POST');
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_TIMEOUT, 5); 
+    curl_setopt($ch, CURLOPT_TIMEOUT, 8); // مهلة اتصال آمنة ومناسبة لمنع تجميد العمليات
     
-    $payload = json_encode(['sql' => $sql, 'params' => $params], JSON_UNESCAPED_UNICODE);
+    // تشفير الاستعلام والمعاملات (حماية مطلقة من SQL Injection عبر الاستعلامات المجهزة)
+    $payload = json_encode([
+        'sql' => $sql,
+        'params' => $params
+    ], JSON_UNESCAPED_UNICODE);
     
     curl_setopt($ch, CURLOPT_HTTPHEADER, [
         'Content-Type: application/json',
-        'Authorization: Bearer ' . $d1_secret
+        'Authorization: Bearer ' . trim($api_token) // التوكن السري الممنوح من Cloudflare
     ]);
     curl_setopt($ch, CURLOPT_POSTFIELDS, $payload);
     
     $response = curl_exec($ch);
     $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $curl_error = curl_error($ch);
     curl_close($ch);
     
-    if ($http_code != 200) {
-        throw new Exception("D1 Database Error (HTTP $http_code): " . $response);
+    if ($response === false) {
+        throw new Exception("فشل الاتصال بقاعدة البيانات: " . $curl_error);
     }
     
     $result = json_decode($response, true);
-    if (!$result || !isset($result['success']) || !$result['success']) {
-        throw new Exception("D1 Query Error: " . ($result['error'] ?? 'Unknown formatting error'));
+    
+    // 4. فحص استجابة الخادم والتحقق من صحة التنفيذ
+    if ($http_code != 200 || !$result || !isset($result['success']) || !$result['success']) {
+        $error_msg = 'خطأ غير معروف في خادم التخزين';
+        if (isset($result['errors'][0]['message'])) {
+            $error_msg = $result['errors'][0]['message'] . " (رمز الخطأ: " . ($result['errors'][0]['code'] ?? '') . ")";
+        }
+        throw new Exception("Cloudflare D1 Error: " . $error_msg);
     }
     
-    return $result['data'] ?? $result['info'];
+    // Cloudflare D1 يعيد مصفوفة من نتائج الاستعلامات في مفتاح 'result'
+    // وبما أننا نرسل استعلاماً فريداً دائماً، نأخذ العنصر الأول [0]
+    $query_result = $result['result'][0] ?? null;
+    if (!$query_result || !$query_result['success']) {
+        throw new Exception("فشل تنفيذ الاستعلام داخل البيئة السحابية.");
+    }
+    
+    // 5. المواءمة التلقائية مع بقية كود النظام الحالي:
+    // إذا كان الاستعلام للقراءة (SELECT)، نرجع النتائج مباشرة
+    // إذا كان استعلام كتابة (INSERT/UPDATE/DELETE)، نرجع معلومات التحديث (مثل عدد الصفوف المعدلة meta)
+    $is_select = preg_match('/^\s*(select|pragma|show|desc)/i', $sql);
+    if ($is_select) {
+        return $query_result['results'] ?? [];
+    } else {
+        return $query_result['meta'] ?? [];
+    }
 }
+
 function escape_like_search($search) {
     return str_replace(['\\', '%', '_'],['\\\\', '\%', '\_'], $search);
 }
@@ -622,7 +645,7 @@ function extract_coords_from_url($url) {
     return null;
 }
 // =======================================================
-// 🚀 نظام هندسة الملفات الثابتة (Static API Builder)
+// 🚀 نظام هندسة الملفات الثابتة (يتم الرفع إلى GitHub فقط)
 // =======================================================
 function build_and_sync_split_json($merchant_username, $products_assoc_array) {
     $timestamp = round(microtime(true) * 1000);
@@ -651,26 +674,42 @@ function build_and_sync_split_json($merchant_username, $products_assoc_array) {
     }
 
     $categories_data = ['_version' => $timestamp, 'data' => $categories_list];
-    $pages = array_chunk($products_list, 20); // كل صفحة 20 منتج
-    if (empty($pages)) $pages = [[]]; // ضمان وجود صفحة فارغة على الأقل إذا مسح التاجر كل منتجاته
+    $pages = array_chunk($products_list, 20); // تقسيم المنتجات (20 لكل صفحة)
+    if (empty($pages)) $pages = [[]]; // ضمان وجود صفحة فارغة على الأقل
 
-    // جلب المانيفست القديم لمعرفة رقم إصدار ملف info.json والحفاظ عليه
-    $old_manifest = kv_request("stores/$merchant_username/manifest", 'GET') ?: [];
+    // جلب المانيفست القديم من GitHub مباشرة (لأننا ألغينا KV) لمعرفة رقم إصدار info.json
+    $gh_owner = getenv('GITHUB_REPO_OWNER') ?: $_ENV['GITHUB_REPO_OWNER'] ?? '';
+    $gh_repo  = getenv('GITHUB_REPO_NAME') ?: $_ENV['GITHUB_REPO_NAME'] ?? '';
+    $gh_token = getenv('GITHUB_TOKEN') ?: $_ENV['GITHUB_TOKEN'] ?? '';
+    
+    $old_manifest = [];
+    $manifest_url = "https://raw.githubusercontent.com/{$gh_owner}/{$gh_repo}/main/stores/{$merchant_username}/manifest.json";
+    
+    $ch_m = curl_init($manifest_url);
+    curl_setopt($ch_m, CURLOPT_RETURNTRANSFER, true);
+    if(!empty($gh_token)) curl_setopt($ch_m, CURLOPT_HTTPHEADER, ["Authorization: Bearer {$gh_token}"]);
+    $manifest_response = curl_exec($ch_m);
+    if (curl_getinfo($ch_m, CURLINFO_HTTP_CODE) == 200) {
+        $old_manifest = json_decode($manifest_response, true) ?: [];
+    }
+    curl_close($ch_m);
+
     $info_version = $old_manifest['files']['info'] ?? $timestamp;
 
     $manifest_versions = [
         'search' => $timestamp,
         'categories' => $timestamp,
-        'info' => $info_version, // 👈 حافظنا على رقم إصدار بيانات المتجر
+        'info' => $info_version, 
         'pages' => []
     ];
+
     // 1. رفع ملف البحث
     sync_to_github("stores/$merchant_username/search_index.json", $search_index, 'PUT', "Update search index v$timestamp");
     
     // 2. رفع ملف الفئات
     sync_to_github("stores/$merchant_username/categories.json", $categories_data, 'PUT', "Update categories v$timestamp");
 
-    // 3. رفع صفحات المنتجات
+    // 3. رفع صفحات المنتجات (بدون انتظار بينها لتكون سريعة)
     foreach ($pages as $index => $page_items) {
         $page_num = $index + 1;
         $page_data = [
@@ -683,7 +722,7 @@ function build_and_sync_split_json($merchant_username, $products_assoc_array) {
         $manifest_versions['pages']["page_$page_num"] = $timestamp;
     }
 
-    // 4. تحديث המانيفست (الدليل)
+    // 4. تحديث המانيفست (الدليل) ورفعه لجيت هاب
     $manifest = [
         'version' => $timestamp,
         'total_products' => count($products_list),
@@ -691,10 +730,8 @@ function build_and_sync_split_json($merchant_username, $products_assoc_array) {
         'files' => $manifest_versions
     ];
     sync_to_github("stores/$merchant_username/manifest.json", $manifest, 'PUT', "Update manifest v$timestamp");
-    kv_request("stores/$merchant_username/manifest", 'PUT', $manifest); // تحديث Cloudflare KV للمزامنة
     
-    // 5. مسح كاش CDN عالمياً وبسرعة فائقة
-    purge_jsdelivr_cache_split($merchant_username, count($pages));
+    // لا حاجة لمسح الكاش هنا، الـ Cloudflare Worker سيحدث الكاش تلقائياً (Stale-While-Revalidate)
 }
 
 // =======================================================
@@ -785,11 +822,7 @@ function calculate_delivery_fee($distance_km) {
     }
     return ceil($total_fee / $rounding_factor) * $rounding_factor;
 }
-// =======================================================
-// 🚀 دالة مزامنة بيانات المتجر (Store Info Sync)
-// =======================================================
 function sync_merchant_info_json($pdo, $user_id, $merchant_username) {
-    // جلب بيانات المتجر من قاعدة البيانات
     $stmt = $pdo->prepare("SELECT store_name, store_type, phone, settings FROM users WHERE id = ?");
     $stmt->execute([$user_id]);
     $user_record = $stmt->fetch(PDO::FETCH_ASSOC);
@@ -799,7 +832,6 @@ function sync_merchant_info_json($pdo, $user_id, $merchant_username) {
     $timestamp = round(microtime(true) * 1000);
     $settings = json_decode($user_record['settings'] ?: '{}', true);
 
-    // تجهيز بيانات ملف info.json بشكل أنيق وخفيف
     $info_data = [
         '_version'   => $timestamp,
         'merchant_id'=> $user_id,
@@ -807,43 +839,32 @@ function sync_merchant_info_json($pdo, $user_id, $merchant_username) {
         'store_name' => $user_record['store_name'],
         'store_type' => $user_record['store_type'],
         'phone'      => $settings['phone'] ?? $user_record['phone'] ?? '',
-        'settings'   => $settings // يحتوي على الموقع (location) والتوصيل المجاني وغيرها
+        'settings'   => $settings 
     ];
 
     // 1. رفع ملف info.json إلى GitHub
     sync_to_github("stores/$merchant_username/info.json", $info_data, 'PUT', "Update store info v$timestamp");
 
-    // 2. جلب المانيفست القديم (للحفاظ على إصدارات المنتجات) وإضافة إصدار الـ info
-    $current_manifest = kv_request("stores/$merchant_username/manifest", 'GET') ?: [];
-    $current_manifest['version'] = $timestamp;
-    if (!isset($current_manifest['files'])) $current_manifest['files'] = [];
-    $current_manifest['files']['info'] = $timestamp; // تحديث إصدار معلومات المتجر فقط
-
-    // 3. رفع المانيفست المحدث
-    sync_to_github("stores/$merchant_username/manifest.json", $current_manifest, 'PUT', "Update manifest with info v$timestamp");
-    kv_request("stores/$merchant_username/manifest", 'PUT', $current_manifest);
-
-    // 4. مسح الكاش لملف info والمانيفست فقط (سريع جداً)
+    // 2. تحديث المانيفست على GitHub
     $gh_owner = getenv('GITHUB_REPO_OWNER') ?: $_ENV['GITHUB_REPO_OWNER'] ?? '';
     $gh_repo  = getenv('GITHUB_REPO_NAME') ?: $_ENV['GITHUB_REPO_NAME'] ?? '';
-    if (!empty($gh_owner) && !empty($gh_repo)) {
-        $urls = [
-            "https://purge.jsdelivr.net/gh/{$gh_owner}/{$gh_repo}@main/stores/{$merchant_username}/manifest.json",
-            "https://purge.jsdelivr.net/gh/{$gh_owner}/{$gh_repo}@main/stores/{$merchant_username}/info.json"
-        ];
-        $mh = curl_multi_init();
-        $chs = [];
-        foreach ($urls as $i => $url) {
-            $chs[$i] = curl_init($url);
-            curl_setopt($chs[$i], CURLOPT_RETURNTRANSFER, true);
-            curl_setopt($chs[$i], CURLOPT_TIMEOUT, 1);
-            curl_multi_add_handle($mh, $chs[$i]);
-        }
-        $running = null;
-        do { curl_multi_exec($mh, $running); } while ($running);
-        foreach ($chs as $ch) { curl_multi_remove_handle($mh, $ch); curl_close($ch); }
-        curl_multi_close($mh);
-    }
+    $gh_token = getenv('GITHUB_TOKEN') ?: $_ENV['GITHUB_TOKEN'] ?? '';
+    
+    $manifest_url = "https://raw.githubusercontent.com/{$gh_owner}/{$gh_repo}/main/stores/{$merchant_username}/manifest.json";
+    
+    $ch_m = curl_init($manifest_url);
+    curl_setopt($ch_m, CURLOPT_RETURNTRANSFER, true);
+    if(!empty($gh_token)) curl_setopt($ch_m, CURLOPT_HTTPHEADER, ["Authorization: Bearer {$gh_token}"]);
+    $manifest_response = curl_exec($ch_m);
+    
+    $current_manifest = json_decode($manifest_response, true) ?: [];
+    curl_close($ch_m);
+
+    $current_manifest['version'] = $timestamp;
+    if (!isset($current_manifest['files'])) $current_manifest['files'] = [];
+    $current_manifest['files']['info'] = $timestamp;
+
+    sync_to_github("stores/$merchant_username/manifest.json", $current_manifest, 'PUT', "Update manifest with info v$timestamp");
 }
 function reassign_stale_orders($pdo) {
     try {
