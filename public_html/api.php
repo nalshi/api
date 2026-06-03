@@ -58,7 +58,7 @@ $allowed_origins = [
     'https://nnny.pages.dev',
     'https://api-ylin.onrender.com', // السماح لسيرفر Render نفسه
     'http://localhost',
-    'http://127.0.0.1'
+    'https://ny-rosy-three.vercel.app'
 ];
 
 $request_origin = $_SERVER['HTTP_ORIGIN'] ?? '';
