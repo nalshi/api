@@ -522,32 +522,7 @@ function trigger_cache_rebuild($merchant_id) {
     curl_exec($ch);
     curl_close($ch);
 }
-// =======================================================
-// 🚀 دالة إجبار شبكة jsDelivr CDN على تحديث الكاش فوراً
-// =======================================================
-// 🚀 دالة إجبار شبكة jsDelivr CDN على تحديث الكاش فوراً
-function purge_jsdelivr_cache($merchant_username) {
-    $gh_owner = getenv('GITHUB_REPO_OWNER') ?: $_ENV['GITHUB_REPO_OWNER'] ?? 'nalshi';
-    $gh_repo  = getenv('GITHUB_REPO_NAME') ?: $_ENV['GITHUB_REPO_NAME'] ?? 'nynn';
 
-    if (empty($gh_owner) || empty($gh_repo)) return;
-
-    // رابط الـ Purge لتحديث ملفات المنتجات والمانيفست والإعدادات
-    $urls_to_purge = [
-        "https://purge.jsdelivr.net/gh/{$gh_owner}/{$gh_repo}@main/stores/{$merchant_username}/products.json",
-        "https://purge.jsdelivr.net/gh/{$gh_owner}/{$gh_repo}@main/stores/{$merchant_username}/manifest.json",
-        "https://purge.jsdelivr.net/gh/{$gh_owner}/{$gh_repo}@main/stores/{$merchant_username}/info.json"
-    ];
-
-    foreach ($urls_to_purge as $purge_url) {
-        $ch = curl_init(); // تم إصلاح هذا السطر
-        curl_setopt($ch, CURLOPT_URL, $purge_url);
-        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-        curl_setopt($ch, CURLOPT_TIMEOUT, 1); // 1 ثانية حتى لا يبطئ الطلب
-        curl_exec($ch);
-        curl_close($ch);
-    }
-}
 function d1_request($sql, $params = []) {
     // جلب القيم من Render فقط!
     $d1_url = getenv('WORKER_D1_URL') ?: $_SERVER['WORKER_D1_URL'] ?? '';
@@ -646,7 +621,122 @@ function extract_coords_from_url($url) {
     }
     return null;
 }
+// =======================================================
+// 🚀 نظام هندسة الملفات الثابتة (Static API Builder)
+// =======================================================
+function build_and_sync_split_json($merchant_username, $products_assoc_array) {
+    $timestamp = round(microtime(true) * 1000);
+    
+    // تحويل المصفوفة إلى قائمة
+    $products_list = !empty($products_assoc_array) ? array_values($products_assoc_array) : [];
+    
+    $search_index = ['_version' => $timestamp, 'data' => []];
+    $categories_list = [];
 
+    foreach ($products_list as $p) {
+        $search_index['data'][] = [
+            'id' => $p['id'],
+            'n'  => $p['name'],
+            'p'  => $p['price'],
+            'd'  => $p['discount'] ?? 0,
+            'i'  => $p['image'] ?? '',
+            't'  => $p['type'] ?? 'عام',
+            'a'  => $p['is_available'] ?? 1
+        ];
+
+        $cat = $p['type'] ?? 'عام';
+        if (!in_array($cat, $categories_list)) {
+            $categories_list[] = $cat;
+        }
+    }
+
+    $categories_data = ['_version' => $timestamp, 'data' => $categories_list];
+    $pages = array_chunk($products_list, 20); // كل صفحة 20 منتج
+    if (empty($pages)) $pages = [[]]; // ضمان وجود صفحة فارغة على الأقل إذا مسح التاجر كل منتجاته
+
+    // جلب المانيفست القديم لمعرفة رقم إصدار ملف info.json والحفاظ عليه
+    $old_manifest = kv_request("stores/$merchant_username/manifest", 'GET') ?: [];
+    $info_version = $old_manifest['files']['info'] ?? $timestamp;
+
+    $manifest_versions = [
+        'search' => $timestamp,
+        'categories' => $timestamp,
+        'info' => $info_version, // 👈 حافظنا على رقم إصدار بيانات المتجر
+        'pages' => []
+    ];
+    // 1. رفع ملف البحث
+    sync_to_github("stores/$merchant_username/search_index.json", $search_index, 'PUT', "Update search index v$timestamp");
+    
+    // 2. رفع ملف الفئات
+    sync_to_github("stores/$merchant_username/categories.json", $categories_data, 'PUT', "Update categories v$timestamp");
+
+    // 3. رفع صفحات المنتجات
+    foreach ($pages as $index => $page_items) {
+        $page_num = $index + 1;
+        $page_data = [
+            '_version' => $timestamp,
+            'page' => $page_num,
+            'total_pages' => count($pages),
+            'data' => $page_items
+        ];
+        sync_to_github("stores/$merchant_username/products_page_$page_num.json", $page_data, 'PUT', "Update page $page_num v$timestamp");
+        $manifest_versions['pages']["page_$page_num"] = $timestamp;
+    }
+
+    // 4. تحديث המانيفست (الدليل)
+    $manifest = [
+        'version' => $timestamp,
+        'total_products' => count($products_list),
+        'total_pages' => count($pages),
+        'files' => $manifest_versions
+    ];
+    sync_to_github("stores/$merchant_username/manifest.json", $manifest, 'PUT', "Update manifest v$timestamp");
+    kv_request("stores/$merchant_username/manifest", 'PUT', $manifest); // تحديث Cloudflare KV للمزامنة
+    
+    // 5. مسح كاش CDN عالمياً وبسرعة فائقة
+    purge_jsdelivr_cache_split($merchant_username, count($pages));
+}
+
+// =======================================================
+// 🚀 مسح كاش الشبكة بشكل متوازي (Multi-cURL) للسرعة القصوى
+// =======================================================
+function purge_jsdelivr_cache_split($merchant_username, $total_pages) {
+    $gh_owner = getenv('GITHUB_REPO_OWNER') ?: $_ENV['GITHUB_REPO_OWNER'] ?? '';
+    $gh_repo  = getenv('GITHUB_REPO_NAME') ?: $_ENV['GITHUB_REPO_NAME'] ?? '';
+
+    if (empty($gh_owner) || empty($gh_repo)) return;
+
+    $urls_to_purge = [
+        "https://purge.jsdelivr.net/gh/{$gh_owner}/{$gh_repo}@main/stores/{$merchant_username}/manifest.json",
+        "https://purge.jsdelivr.net/gh/{$gh_owner}/{$gh_repo}@main/stores/{$merchant_username}/search_index.json",
+        "https://purge.jsdelivr.net/gh/{$gh_owner}/{$gh_repo}@main/stores/{$merchant_username}/categories.json",
+        "https://purge.jsdelivr.net/gh/{$gh_owner}/{$gh_repo}@main/stores/{$merchant_username}/info.json",
+        "https://purge.jsdelivr.net/gh/{$gh_owner}/{$gh_repo}@main/stores/{$merchant_username}/products.json" // للملف القديم احتياطياً
+    ];
+
+    for ($i = 1; $i <= $total_pages; $i++) {
+        $urls_to_purge[] = "https://purge.jsdelivr.net/gh/{$gh_owner}/{$gh_repo}@main/stores/{$merchant_username}/products_page_{$i}.json";
+    }
+
+    // تنفيذ الطلبات في نفس اللحظة (بدون انتظار كل رابط)
+    $mh = curl_multi_init();
+    $ch_array = [];
+    foreach ($urls_to_purge as $i => $url) {
+        $ch_array[$i] = curl_init($url);
+        curl_setopt($ch_array[$i], CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch_array[$i], CURLOPT_TIMEOUT, 1);
+        curl_multi_add_handle($mh, $ch_array[$i]);
+    }
+    
+    $running = null;
+    do { curl_multi_exec($mh, $running); } while ($running);
+    
+    foreach ($ch_array as $ch) {
+        curl_multi_remove_handle($mh, $ch);
+        curl_close($ch);
+    }
+    curl_multi_close($mh);
+}
 function update_kv_manifest($merchant_username) {
     $manifest_data = ['version' => round(microtime(true) * 1000)];
     kv_request("stores/$merchant_username/manifest", 'PUT', $manifest_data);
@@ -695,7 +785,66 @@ function calculate_delivery_fee($distance_km) {
     }
     return ceil($total_fee / $rounding_factor) * $rounding_factor;
 }
+// =======================================================
+// 🚀 دالة مزامنة بيانات المتجر (Store Info Sync)
+// =======================================================
+function sync_merchant_info_json($pdo, $user_id, $merchant_username) {
+    // جلب بيانات المتجر من قاعدة البيانات
+    $stmt = $pdo->prepare("SELECT store_name, store_type, phone, settings FROM users WHERE id = ?");
+    $stmt->execute([$user_id]);
+    $user_record = $stmt->fetch(PDO::FETCH_ASSOC);
 
+    if (!$user_record) return;
+
+    $timestamp = round(microtime(true) * 1000);
+    $settings = json_decode($user_record['settings'] ?: '{}', true);
+
+    // تجهيز بيانات ملف info.json بشكل أنيق وخفيف
+    $info_data = [
+        '_version'   => $timestamp,
+        'merchant_id'=> $user_id,
+        'username'   => $merchant_username,
+        'store_name' => $user_record['store_name'],
+        'store_type' => $user_record['store_type'],
+        'phone'      => $settings['phone'] ?? $user_record['phone'] ?? '',
+        'settings'   => $settings // يحتوي على الموقع (location) والتوصيل المجاني وغيرها
+    ];
+
+    // 1. رفع ملف info.json إلى GitHub
+    sync_to_github("stores/$merchant_username/info.json", $info_data, 'PUT', "Update store info v$timestamp");
+
+    // 2. جلب المانيفست القديم (للحفاظ على إصدارات المنتجات) وإضافة إصدار الـ info
+    $current_manifest = kv_request("stores/$merchant_username/manifest", 'GET') ?: [];
+    $current_manifest['version'] = $timestamp;
+    if (!isset($current_manifest['files'])) $current_manifest['files'] = [];
+    $current_manifest['files']['info'] = $timestamp; // تحديث إصدار معلومات المتجر فقط
+
+    // 3. رفع المانيفست المحدث
+    sync_to_github("stores/$merchant_username/manifest.json", $current_manifest, 'PUT', "Update manifest with info v$timestamp");
+    kv_request("stores/$merchant_username/manifest", 'PUT', $current_manifest);
+
+    // 4. مسح الكاش لملف info والمانيفست فقط (سريع جداً)
+    $gh_owner = getenv('GITHUB_REPO_OWNER') ?: $_ENV['GITHUB_REPO_OWNER'] ?? '';
+    $gh_repo  = getenv('GITHUB_REPO_NAME') ?: $_ENV['GITHUB_REPO_NAME'] ?? '';
+    if (!empty($gh_owner) && !empty($gh_repo)) {
+        $urls = [
+            "https://purge.jsdelivr.net/gh/{$gh_owner}/{$gh_repo}@main/stores/{$merchant_username}/manifest.json",
+            "https://purge.jsdelivr.net/gh/{$gh_owner}/{$gh_repo}@main/stores/{$merchant_username}/info.json"
+        ];
+        $mh = curl_multi_init();
+        $chs = [];
+        foreach ($urls as $i => $url) {
+            $chs[$i] = curl_init($url);
+            curl_setopt($chs[$i], CURLOPT_RETURNTRANSFER, true);
+            curl_setopt($chs[$i], CURLOPT_TIMEOUT, 1);
+            curl_multi_add_handle($mh, $chs[$i]);
+        }
+        $running = null;
+        do { curl_multi_exec($mh, $running); } while ($running);
+        foreach ($chs as $ch) { curl_multi_remove_handle($mh, $ch); curl_close($ch); }
+        curl_multi_close($mh);
+    }
+}
 function reassign_stale_orders($pdo) {
     try {
         $pdo->beginTransaction();
@@ -2113,10 +2262,7 @@ try {
 
                     // تحديث KV / Firebase لتبقى واجهة الزبائن الحالية محدثة
                    kv_request("stores/$m_username/products", 'PUT', $fb_products_update);
-// تحديث مستودع GitHub بعد خصم المنتجات
-sync_to_github("stores/$m_username/products.json", $fb_products_update, 'PUT', "Stock auto-deduction for order");
-update_kv_manifest($m_username);
-
+build_and_sync_split_json($m_username, $fb_products_update);
                     // دفع الطلب إلى Firebase ليظهر في لوحة التاجر الحية
                     $merchant_secret_hash = md5($m_id . APP_SECRET_KEY . 'orders');
                     $fb_order_data = $tick['ticket_data'];
@@ -2861,7 +3007,10 @@ update_kv_manifest($m_username);
 
             flag_cache_for_rebuild($new_merchant_id);
             
-            setcookie('state_token', '', ['expires' => time() - 3600, 'path' => '/', 'secure' => $is_secure, 'httponly' => true, 'samesite' => $is_secure ? 'None' : 'Lax']); 
+            // توليد ملف المتجر الأولي في GitHub
+            sync_merchant_info_json($pdo, $new_merchant_id, $merchant_username);
+            
+            setcookie('state_token', '', ['expires' => time() - 3600, 'path' => '/', 'secure' => $is_secure, 'httponly' => true, 'samesite' => $is_secure ? 'None' : 'Lax']);
             send_response('success',['message' => 'تم تفعيل حسابك بنجاح! يمكنك الآن تسجيل الدخول.']);
             break;        
 
@@ -3417,9 +3566,7 @@ update_kv_manifest($m_username);
             
             kv_request("stores/$merchant_username/products", 'PUT', $current_products);
 // مزامنة فورية إلى GitHub كمستودع JSON
-sync_to_github("stores/$merchant_username/products.json", $current_products, 'PUT', "Add/Update product $pid");
-update_kv_manifest($merchant_username);
-purge_jsdelivr_cache($merchant_username);
+build_and_sync_split_json($merchant_username, $current_products);
             
             // 8. إرجاع استجابة النجاح
             send_response('success', [
@@ -3672,10 +3819,8 @@ purge_jsdelivr_cache($merchant_username);
                 unset($current_products[$product_id]);
                 kv_request("stores/$merchant_username/products", 'PUT', $current_products);
 // مزامنة تحديث الكمية في GitHub
-sync_to_github("stores/$merchant_username/products.json", $current_products, 'PUT', "Update stock for $product_id");
-update_kv_manifest($merchant_username);
-            }
-purge_jsdelivr_cache($merchant_username);            
+build_and_sync_split_json($merchant_username, $current_products);
+            }         
             // 4. الحذف من Firebase إن وجد
             fb_request("stores/$merchant_username/products/$product_id.json", 'DELETE');
             
@@ -3699,10 +3844,9 @@ purge_jsdelivr_cache($merchant_username);
                 $current_products[$product_id]['is_available'] = $req_status;
                 $current_products[$product_id]['updated_at'] = time();
                 kv_request("stores/$merchant_username/products", 'PUT', $current_products);
-sync_to_github("stores/$merchant_username/products.json", $current_products, 'PUT', "Toggle visibility for $product_id");
-update_kv_manifest($merchant_username);
+build_and_sync_split_json($merchant_username, $current_products);
             }
-purge_jsdelivr_cache($merchant_username);            
+       
             send_response('success',['message' => 'تم تحديث حالة المنتج (إخفاء/إظهار) بنجاح.']);
             break;
            case 'add_quantity':
@@ -3770,10 +3914,9 @@ purge_jsdelivr_cache($merchant_username);
                     $current_products[$product_id]['options'] = json_decode($new_options_json, true);
                 }
                 $current_products[$product_id]['updated_at'] = time();
-                kv_request("stores/$merchant_username/products", 'PUT', $current_products);
-                update_kv_manifest($merchant_username);
+                build_and_sync_split_json($merchant_username, $current_products);
             }
-purge_jsdelivr_cache($merchant_username);            
+                                  
             send_response('success',['message' => 'تمت إضافة الكمية للمخزون بنجاح ✅']);
             break;              
 
@@ -4398,7 +4541,7 @@ purge_jsdelivr_cache($merchant_username);
                                 ]);
                                 // يتم إضافته بعد انتهاء حلقة foreach التي تعدل المنتجات 
 $updated_products = kv_request("stores/$merchant_username/products") ?: [];
-sync_to_github("stores/$merchant_username/products.json", $updated_products, 'PUT', "Restock products from cancelled order");
+build_and_sync_split_json($merchant_username, $updated_products);
                             } else {
                                 $new_qty = (int)($product['quantity'] ?? 0) + $qty;
                                 
@@ -4478,12 +4621,10 @@ sync_to_github("stores/$merchant_username/products.json", $updated_products, 'PU
                 'store_type' => $storeType ?: $user_record['store_type'],
                 'settings' => $final_settings
             ];
-            sync_to_firebase($merchant_username, 'info', null, $fb_settings, 'PUT');        
-            sync_to_github("stores/$merchant_username/info.json", $fb_settings, 'PUT', "Update store settings");
-            purge_jsdelivr_cache($merchant_username);   
             $json_settings = json_encode($final_settings, JSON_UNESCAPED_UNICODE);
             
-            update_kv_manifest($merchant_username);            
+            // استدعاء الدالة الجديدة لتوليد info.json ورفعه مع المانيفست
+            sync_merchant_info_json($pdo, $user_id, $merchant_username);     
             
             $stmt_update->execute([
                 $storeName, 
