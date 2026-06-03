@@ -3745,10 +3745,26 @@ build_and_sync_split_json($merchant_username, $current_products);
             if (!$user_id) send_response('error',['message' => 'غير مصرح'], 401);
             
             $term = strtolower(sanitize_input($input['term'] ?? ''));
+            $page = max(1, (int)($input['page'] ?? 1));
+            $limit = max(1, min(50, (int)($input['limit'] ?? 15))); // جلب 15 منتج فقط كدفعة أولى لتوفير D1
+            $offset = ($page - 1) * $limit;
             
-            // جلب المنتجات للتاجر فقط
-            $sql = "SELECT * FROM products WHERE merchant_id = ? ORDER BY updated_at DESC";
-            $products = d1_request($sql, [$user_id]);
+            $sql = "SELECT * FROM products WHERE merchant_id = ?";
+            $params = [$user_id];
+
+            // البحث داخل قاعدة البيانات مباشرة لتوفير الرام
+            if ($term) {
+                $sql .= " AND (name LIKE ? OR description LIKE ?)";
+                $search_term = "%" . escape_like_search($term) . "%";
+                $params[] = $search_term;
+                $params[] = $search_term;
+            }
+
+            $sql .= " ORDER BY updated_at DESC LIMIT ? OFFSET ?";
+            $params[] = $limit;
+            $params[] = $offset;
+
+            $products = d1_request($sql, $params);
             
             // تحويل الـ JSON strings إلى مصفوفات
             foreach($products as &$p) {
@@ -3756,16 +3772,11 @@ build_and_sync_split_json($merchant_username, $current_products);
                 if ($user_role === 'delivery') unset($p['cost_price']);
             }
 
-            if ($term) {
-                $products = array_filter($products, function($p) use ($term) {
-                    return strpos(strtolower($p['name']), $term) !== false;
-                });
-                $products = array_values($products); 
-            }
+            // معرفة ما إذا كان هناك صفحات أخرى
+            $has_more = count($products) === $limit;
 
-            send_response('success',['data' => $products]);
-            break;
-      
+            send_response('success',['data' => $products, 'has_more' => $has_more, 'page' => $page]);
+            break;    
         case 'get_product':
             if (!$user_id) send_response('error',['message' => 'غير مصرح'], 401);
             
