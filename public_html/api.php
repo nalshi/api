@@ -3556,38 +3556,46 @@ build_and_sync_split_json($m_username, $fb_products_update);
                 
             }
 
-            // ========================================================
-            // 7. مزامنة احتياطية لـ KV (لضمان عمل واجهة الزبائن الحالية بدون أعطال)
+// ========================================================
+            // 7. مزامنة احتياطية لـ KV وجيت هاب (الاعتماد على D1 كمصدر موثوق)
             // ========================================================
             $merchant_username = $_SESSION['username'] ?? get_username_by_id($pdo, $user_id);
             $store_name = $_SESSION['store_name'] ?? get_store_name_by_id($pdo, $user_id);
 
-            $current_products = kv_request("stores/$merchant_username/products") ?: [];
-            $current_products[$pid] = [
-                'id' => $pid,
-                'global_product_id' => $pid,
-                'name' => $name,
-                'mainDescription' => $desc,
-                'price' => $sell_price,
-                'cost_price' => $cost_price,
-                'discount' => $discount_percent,
-                'image' => $img,
-                'type' => $category_name,
-                'category_id' => $category_id_input,
-                'options' => json_decode($options, true) ?: [],
-                'quantity' => $quantity,
-                'quantity_type' => $quantity_type,
-                'is_available' => $is_available,
-                'currency' => $currency,
-                'merchant_id' => $user_id,
-                'merchant_username' => $merchant_username,
-                'merchant_name' => $store_name,
-                'updated_at' => time()
-            ];
+            // جلب جميع منتجات التاجر من D1 (المصدر الأساسي) لتجنب الحذف لو فشل KV
+            $all_products_from_db = d1_request("SELECT * FROM products WHERE merchant_id = ?", [$user_id]);
+
+            $current_products = [];
+            if (is_array($all_products_from_db)) {
+                foreach ($all_products_from_db as $prod) {
+                    $current_products[$prod['id']] = [
+                        'id' => $prod['id'],
+                        'global_product_id' => $prod['id'],
+                        'name' => $prod['name'],
+                        'mainDescription' => $prod['description'],
+                        'price' => (float)$prod['price'],
+                        'cost_price' => (float)$prod['cost_price'],
+                        'discount' => (float)$prod['discount'],
+                        'image' => $prod['image'],
+                        'type' => $prod['type'],
+                        'category_id' => $prod['category_id'] ?? '',
+                        'options' => json_decode($prod['options'] ?? '[]', true) ?: [],
+                        'quantity' => (int)$prod['quantity'],
+                        'quantity_type' => $prod['quantity_type'],
+                        'is_available' => (int)$prod['is_available'],
+                        'currency' => $prod['currency'] ?? 'YER',
+                        'merchant_id' => $user_id,
+                        'merchant_username' => $merchant_username,
+                        'merchant_name' => $store_name,
+                        'updated_at' => $prod['updated_at'] ?? time()
+                    ];
+                }
+            }
             
+            // تحديث KV
             kv_request("stores/$merchant_username/products", 'PUT', $current_products);
-// مزامنة فورية إلى GitHub كمستودع JSON
-build_and_sync_split_json($merchant_username, $current_products);
+            // مزامنة فورية إلى GitHub كمستودع JSON بكامل المنتجات
+            build_and_sync_split_json($merchant_username, $current_products);
             
             // 8. إرجاع استجابة النجاح
             send_response('success', [
@@ -3841,18 +3849,28 @@ build_and_sync_split_json($merchant_username, $current_products);
                 throw new Exception("لا يمكنك حذف هذا المنتج حالياً لأنه موجود ضمن طلب نشط للزبائن. قم بإنهاء الطلب أو إلغائه أولاً.");
             }
 
-            // 2. الحذف الآمن من Cloudflare D1 (نضمن أن التاجر يحذف منتجه فقط)
-            $sql = "DELETE FROM products WHERE id = ? AND merchant_id = ?";
-            d1_request($sql, [$product_id, $user_id]);
-
-            // 3. المزامنة: الحذف من واجهة KV لضمان تحديث متجر الزبائن
-            $current_products = kv_request("stores/$merchant_username/products") ?: [];
-            if (isset($current_products[$product_id])) {
-                unset($current_products[$product_id]);
-                kv_request("stores/$merchant_username/products", 'PUT', $current_products);
-// مزامنة تحديث الكمية في GitHub
-build_and_sync_split_json($merchant_username, $current_products);
-            }         
+ // 3. المزامنة بعد الحذف: جلب القائمة المتبقية من D1 لرفعها لـ GitHub
+            $all_products_from_db = d1_request("SELECT * FROM products WHERE merchant_id = ?", [$user_id]);
+            $current_products = [];
+            if (is_array($all_products_from_db)) {
+                foreach ($all_products_from_db as $prod) {
+                    $current_products[$prod['id']] = [
+                        'id' => $prod['id'],
+                        'global_product_id' => $prod['id'],
+                        'name' => $prod['name'],
+                        'price' => (float)$prod['price'],
+                        'discount' => (float)$prod['discount'],
+                        'image' => $prod['image'],
+                        'type' => $prod['type'],
+                        'options' => json_decode($prod['options'] ?? '[]', true) ?: [],
+                        'quantity' => (int)$prod['quantity'],
+                        'quantity_type' => $prod['quantity_type'],
+                        'is_available' => (int)$prod['is_available']
+                    ];
+                }
+            }
+            kv_request("stores/$merchant_username/products", 'PUT', $current_products);
+            build_and_sync_split_json($merchant_username, $current_products);
             // 4. الحذف من Firebase إن وجد
             fb_request("stores/$merchant_username/products/$product_id.json", 'DELETE');
             
@@ -3867,17 +3885,28 @@ build_and_sync_split_json($merchant_username, $current_products);
             $merchant_username = $_SESSION['username'] ?? get_username_by_id($pdo, $user_id);
 
             // 1. تحديث الحالة في D1 بأمان
-            $sql = "UPDATE products SET is_available = ?, updated_at = ? WHERE id = ? AND merchant_id = ?";
-            d1_request($sql, [$req_status, time(), $product_id, $user_id]);
-
-            // 2. مزامنة الحالة مع واجهة KV (التخزين المؤقت للعملاء)
-            $current_products = kv_request("stores/$merchant_username/products") ?: [];
-            if (isset($current_products[$product_id])) {
-                $current_products[$product_id]['is_available'] = $req_status;
-                $current_products[$product_id]['updated_at'] = time();
-                kv_request("stores/$merchant_username/products", 'PUT', $current_products);
-build_and_sync_split_json($merchant_username, $current_products);
+            // 2. مزامنة الحالة مع جيت هاب بناءً على D1
+            $all_products_from_db = d1_request("SELECT * FROM products WHERE merchant_id = ?", [$user_id]);
+            $current_products = [];
+            if (is_array($all_products_from_db)) {
+                foreach ($all_products_from_db as $prod) {
+                    $current_products[$prod['id']] = [
+                        'id' => $prod['id'],
+                        'global_product_id' => $prod['id'],
+                        'name' => $prod['name'],
+                        'price' => (float)$prod['price'],
+                        'discount' => (float)$prod['discount'],
+                        'image' => $prod['image'],
+                        'type' => $prod['type'],
+                        'options' => json_decode($prod['options'] ?? '[]', true) ?: [],
+                        'quantity' => (int)$prod['quantity'],
+                        'quantity_type' => $prod['quantity_type'],
+                        'is_available' => (int)$prod['is_available']
+                    ];
+                }
             }
+            kv_request("stores/$merchant_username/products", 'PUT', $current_products);
+            build_and_sync_split_json($merchant_username, $current_products);
        
             send_response('success',['message' => 'تم تحديث حالة المنتج (إخفاء/إظهار) بنجاح.']);
             break;
