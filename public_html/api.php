@@ -1277,7 +1277,7 @@ try {
             send_response('success');
             break;    
 
-        case 'verify_cart_live':
+ case 'verify_cart_live':
             $cart_items = $input['items'] ?? [];
             if (empty($cart_items)) send_response('success', ['can_proceed' => true]);
 
@@ -1292,16 +1292,14 @@ try {
 
                 // 🚀 استعلام مباشر وفوري من Cloudflare D1
                 $d1_res = d1_request("SELECT price, quantity, quantity_type, is_available, discount, options FROM products WHERE id = ?", [$product_id]);
-$db_item = $d1_res[0] ?? null;
+                $db_item = $d1_res[0] ?? null;
 
-// الدعم العكسي: إذا لم يجده في D1، ابحث عنه في MySQL (merchant_listings)
-if (!$db_item) {
-    $stmt_check = $pdo->prepare("SELECT l.merchant_price as price, l.quantity, l.quantity_type, l.is_available, p.discount, p.sizes as options FROM merchant_listings l JOIN products p ON l.global_product_id = p.id WHERE l.id = ? OR p.id = ?");
-    $stmt_check->execute([$product_id, $product_id]);
-    $db_item = $stmt_check->fetch(PDO::FETCH_ASSOC);
-}
-
-if (!$db_item || $db_item['is_available'] == 0) {
+                // الدعم العكسي: إذا لم يجده في D1، ابحث عنه في MySQL (merchant_listings)
+                if (!$db_item) {
+                    $stmt_check = $pdo->prepare("SELECT l.merchant_price as price, l.quantity, l.quantity_type, l.is_available, p.discount, p.sizes as options FROM merchant_listings l JOIN products p ON l.global_product_id = p.id WHERE l.id = ? OR p.id = ?");
+                    $stmt_check->execute([$product_id, $product_id]);
+                    $db_item = $stmt_check->fetch(PDO::FETCH_ASSOC);
+                }
 
                 if (!$db_item || $db_item['is_available'] == 0) {
                     $changes[] = "المنتج '{$item['name']}' نفد أو تم إخفاؤه. تم حذفه من سلتك.";
@@ -2058,47 +2056,49 @@ if (!$listing || $listing['is_available'] == 0) {
                 
                 // جلب المنتجات الحقيقية من D1 بناءً على Merchant ID
                 // تجهيز معرفات المنتجات
-$product_ids = array_map(function($i) { return $i['product_id'] ?? $i['listing_id']; }, $items);
-$placeholders = implode(',', array_fill(0, count($product_ids), '?'));
-$params = array_merge([$merchant_id], $product_ids);
+                $product_ids = array_map(function($i) { return $i['product_id'] ?? $i['listing_id']; }, $items);
+                $placeholders = implode(',', array_fill(0, count($product_ids), '?'));
+                $params = array_merge([$merchant_id], $product_ids);
 
-$d1_products = [];
+                $d1_products = [];
 
-// 1. محاولة جلب المنتجات من Cloudflare D1
-try {
-    $d1_sql = "SELECT * FROM products WHERE merchant_id = ? AND id IN ($placeholders)";
-    $d1_results = d1_request($d1_sql, $params);
-    foreach($d1_results as $row) {
-        $row['options'] = json_decode($row['options'] ?? '[]', true) ?: [];
-        $d1_products[$row['id']] = $row;
-    }
-} catch (Exception $e) {
-    // تجاهل الخطأ للبحث في MySQL
-}
+                // 1. محاولة جلب المنتجات من Cloudflare D1
+                try {
+                    $d1_sql = "SELECT * FROM products WHERE merchant_id = ? AND id IN ($placeholders)";
+                    $d1_results = d1_request($d1_sql, $params);
+                    foreach($d1_results as $row) {
+                        $row['options'] = json_decode($row['options'] ?? '[]', true) ?: [];
+                        $d1_products[$row['id']] = $row;
+                    }
+                } catch (Exception $e) {
+                    // تجاهل الخطأ للبحث في MySQL
+                }
 
-// 2. الدعم العكسي: جلب المنتجات من MySQL (merchant_listings) إذا كانت مفقودة
-$pdo_sql = "
-    SELECT p.id as global_product_id, p.name, p.image, p.sizes as options, p.discount, p.cost_price, 
-           l.id as listing_id, l.merchant_price as price, l.quantity, l.quantity_type, l.currency, l.is_available 
-    FROM merchant_listings l 
-    JOIN products p ON l.global_product_id = p.id 
-    WHERE l.merchant_id = ? AND (l.id IN ($placeholders) OR p.id IN ($placeholders))
-";
-$stmt_pdo = $pdo->prepare($pdo_sql);
-$stmt_pdo->execute($params);
-$pdo_results = $stmt_pdo->fetchAll(PDO::FETCH_ASSOC);
+                // 2. الدعم العكسي: جلب المنتجات من MySQL (merchant_listings) إذا كانت مفقودة
+                $pdo_sql = "
+                    SELECT p.id as global_product_id, p.name, p.image, p.sizes as options, p.discount, p.cost_price, 
+                           l.id as listing_id, l.merchant_price as price, l.quantity, l.quantity_type, l.currency, l.is_available 
+                    FROM merchant_listings l 
+                    JOIN products p ON l.global_product_id = p.id 
+                    WHERE l.merchant_id = ? AND (l.id IN ($placeholders) OR p.id IN ($placeholders))
+                ";
+                $stmt_pdo = $pdo->prepare($pdo_sql);
+                // مصفوفة معاملات مكررة لتتناسب بدقة مع علامات الاستفهام المتكررة
+                $params_pdo = array_merge([$merchant_id], $product_ids, $product_ids);
+                $stmt_pdo->execute($params_pdo);
+                $pdo_results = $stmt_pdo->fetchAll(PDO::FETCH_ASSOC);
 
-foreach($pdo_results as $row) {
-    $pid = $row['global_product_id'];
-    $lid = $row['listing_id'];
-    
-    $row['id'] = $pid; // توحيد المفتاح ليكون مطابق للطلب
-    $row['options'] = json_decode($row['options'] ?? '[]', true) ?: [];
-    
-    // دمج المنتجات القديمة مع الجديدة لتجاوز خطأ "المنتج غير موجود"
-    if (!isset($d1_products[$pid])) $d1_products[$pid] = $row;
-    if (!isset($d1_products[$lid])) $d1_products[$lid] = $row;
-}
+                foreach($pdo_results as $row) {
+                    $pid = $row['global_product_id'];
+                    $lid = $row['listing_id'];
+                    
+                    $row['id'] = $pid; // توحيد المفتاح ليكون مطابق للطلب
+                    $row['options'] = json_decode($row['options'] ?? '[]', true) ?: [];
+                    
+                    // دمج المنتجات القديمة مع الجديدة لتجاوز خطأ "المنتج غير موجود"
+                    if (!isset($d1_products[$pid])) $d1_products[$pid] = $row;
+                    if (!isset($d1_products[$lid])) $d1_products[$lid] = $row;
+                }
                 
                 $order_items_array = [];
                 $total_products_price = 0;
