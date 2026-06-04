@@ -1292,7 +1292,16 @@ try {
 
                 // 🚀 استعلام مباشر وفوري من Cloudflare D1
                 $d1_res = d1_request("SELECT price, quantity, quantity_type, is_available, discount, options FROM products WHERE id = ?", [$product_id]);
-                $db_item = $d1_res[0] ?? null;
+$db_item = $d1_res[0] ?? null;
+
+// الدعم العكسي: إذا لم يجده في D1، ابحث عنه في MySQL (merchant_listings)
+if (!$db_item) {
+    $stmt_check = $pdo->prepare("SELECT l.merchant_price as price, l.quantity, l.quantity_type, l.is_available, p.discount, p.sizes as options FROM merchant_listings l JOIN products p ON l.global_product_id = p.id WHERE l.id = ? OR p.id = ?");
+    $stmt_check->execute([$product_id, $product_id]);
+    $db_item = $stmt_check->fetch(PDO::FETCH_ASSOC);
+}
+
+if (!$db_item || $db_item['is_available'] == 0) {
 
                 if (!$db_item || $db_item['is_available'] == 0) {
                     $changes[] = "المنتج '{$item['name']}' نفد أو تم إخفاؤه. تم حذفه من سلتك.";
@@ -1819,10 +1828,18 @@ try {
             }
             
             // 🚀 استعلام فوري من Cloudflare D1 لجلب الكمية الحقيقية اللحظية
-            $d1_res = d1_request("SELECT merchant_id, id as global_product_id, quantity, quantity_type, is_available, options FROM products WHERE id = ?", [$product_id]);
-            $listing = $d1_res[0] ?? null;
+           // 🚀 استعلام فوري من Cloudflare D1 لجلب الكمية الحقيقية اللحظية
+$d1_res = d1_request("SELECT merchant_id, id as global_product_id, quantity, quantity_type, is_available, options FROM products WHERE id = ?", [$product_id]);
+$listing = $d1_res[0] ?? null;
 
-            if (!$listing || $listing['is_available'] == 0) {
+// الدعم العكسي للمنتجات القديمة ومنتجات الكتالوج
+if (!$listing) {
+    $stmt_check = $pdo->prepare("SELECT l.merchant_id, p.id as global_product_id, l.quantity, l.quantity_type, l.is_available, p.sizes as options FROM merchant_listings l JOIN products p ON l.global_product_id = p.id WHERE l.id = ? OR p.id = ?");
+    $stmt_check->execute([$product_id, $product_id]);
+    $listing = $stmt_check->fetch(PDO::FETCH_ASSOC);
+}
+
+if (!$listing || $listing['is_available'] == 0) {
                 throw new Exception("هذا المنتج غير متاح للبيع من هذا التاجر حالياً.");
             }
 
@@ -2040,20 +2057,48 @@ try {
                 $m_settings = json_decode($m_info['settings'] ?: '{}', true);
                 
                 // جلب المنتجات الحقيقية من D1 بناءً على Merchant ID
-                $product_ids = array_map(function($i) { return $i['product_id'] ?? $i['listing_id']; }, $items);
-                $placeholders = implode(',', array_fill(0, count($product_ids), '?'));
-                $params = array_merge([$merchant_id], $product_ids);
-                
-                // استعلام D1
-                $d1_sql = "SELECT * FROM products WHERE merchant_id = ? AND id IN ($placeholders)";
-                $d1_results = d1_request($d1_sql, $params);
-                
-                // تحويل النتائج لمصفوفة يسهل البحث فيها
-                $d1_products = [];
-                foreach($d1_results as $row) {
-                    $row['options'] = json_decode($row['options'] ?? '[]', true) ?: [];
-                    $d1_products[$row['id']] = $row;
-                }
+                // تجهيز معرفات المنتجات
+$product_ids = array_map(function($i) { return $i['product_id'] ?? $i['listing_id']; }, $items);
+$placeholders = implode(',', array_fill(0, count($product_ids), '?'));
+$params = array_merge([$merchant_id], $product_ids);
+
+$d1_products = [];
+
+// 1. محاولة جلب المنتجات من Cloudflare D1
+try {
+    $d1_sql = "SELECT * FROM products WHERE merchant_id = ? AND id IN ($placeholders)";
+    $d1_results = d1_request($d1_sql, $params);
+    foreach($d1_results as $row) {
+        $row['options'] = json_decode($row['options'] ?? '[]', true) ?: [];
+        $d1_products[$row['id']] = $row;
+    }
+} catch (Exception $e) {
+    // تجاهل الخطأ للبحث في MySQL
+}
+
+// 2. الدعم العكسي: جلب المنتجات من MySQL (merchant_listings) إذا كانت مفقودة
+$pdo_sql = "
+    SELECT p.id as global_product_id, p.name, p.image, p.sizes as options, p.discount, p.cost_price, 
+           l.id as listing_id, l.merchant_price as price, l.quantity, l.quantity_type, l.currency, l.is_available 
+    FROM merchant_listings l 
+    JOIN products p ON l.global_product_id = p.id 
+    WHERE l.merchant_id = ? AND (l.id IN ($placeholders) OR p.id IN ($placeholders))
+";
+$stmt_pdo = $pdo->prepare($pdo_sql);
+$stmt_pdo->execute($params);
+$pdo_results = $stmt_pdo->fetchAll(PDO::FETCH_ASSOC);
+
+foreach($pdo_results as $row) {
+    $pid = $row['global_product_id'];
+    $lid = $row['listing_id'];
+    
+    $row['id'] = $pid; // توحيد المفتاح ليكون مطابق للطلب
+    $row['options'] = json_decode($row['options'] ?? '[]', true) ?: [];
+    
+    // دمج المنتجات القديمة مع الجديدة لتجاوز خطأ "المنتج غير موجود"
+    if (!isset($d1_products[$pid])) $d1_products[$pid] = $row;
+    if (!isset($d1_products[$lid])) $d1_products[$lid] = $row;
+}
                 
                 $order_items_array = [];
                 $total_products_price = 0;
