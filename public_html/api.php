@@ -1278,6 +1278,7 @@ try {
             break;    
 
  case 'verify_cart_live':
+            case 'verify_cart_live':
             $cart_items = $input['items'] ?? [];
             if (empty($cart_items)) send_response('success', ['can_proceed' => true]);
 
@@ -1286,20 +1287,25 @@ try {
             $can_proceed = true;
 
             foreach ($cart_items as $item) {
-                // الاعتماد على product_id لجلب البيانات من D1
                 $product_id = $item['product_id'] ?? $item['listing_id'];
                 $size_id = $item['size_id'] ?? null;
+                $db_item = null;
 
-                // 🚀 استعلام مباشر وفوري من Cloudflare D1
-                $d1_res = d1_request("SELECT price, quantity, quantity_type, is_available, discount, options FROM products WHERE id = ?", [$product_id]);
-                $db_item = $d1_res[0] ?? null;
+                // ⭐ إضافة الحماية (try-catch) لمنع انهيار السيرفر إذا لم تكن السحابة مجهزة
+                try {
+                    $d1_res = d1_request("SELECT price, quantity, quantity_type, is_available, discount, options FROM products WHERE id = ?", [$product_id]);
+                    $db_item = $d1_res[0] ?? null;
+                } catch (Exception $e) {
+                    // تجاهل الخطأ ليتم الاعتماد على قاعدة البيانات المحلية كبديل
+                }
 
-                // الدعم العكسي: إذا لم يجده في D1، ابحث عنه في MySQL (merchant_listings)
+                // الدعم العكسي: إذا لم يجده في D1، ابحث عنه في MySQL
                 if (!$db_item) {
                     $stmt_check = $pdo->prepare("SELECT l.merchant_price as price, l.quantity, l.quantity_type, l.is_available, p.discount, p.sizes as options FROM merchant_listings l JOIN products p ON l.global_product_id = p.id WHERE l.id = ? OR p.id = ?");
                     $stmt_check->execute([$product_id, $product_id]);
                     $db_item = $stmt_check->fetch(PDO::FETCH_ASSOC);
                 }
+                
 
                 if (!$db_item || $db_item['is_available'] == 0) {
                     $changes[] = "المنتج '{$item['name']}' نفد أو تم إخفاؤه. تم حذفه من سلتك.";
