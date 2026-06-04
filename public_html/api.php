@@ -3875,37 +3875,91 @@ if (!$listing || $listing['is_available'] == 0) {
             
             $term = strtolower(sanitize_input($input['term'] ?? ''));
             $page = max(1, (int)($input['page'] ?? 1));
-            $limit = max(1, min(50, (int)($input['limit'] ?? 15))); // جلب 15 منتج فقط كدفعة أولى لتوفير D1
+            // رفعنا الليمت قليلاً لضمان جلب أكبر قدر ممكن في أول سحبة
+            $limit = max(1, min(100, (int)($input['limit'] ?? 15))); 
             $offset = ($page - 1) * $limit;
             
-            $sql = "SELECT * FROM products WHERE merchant_id = ?";
-            $params = [$user_id];
+            $merged_products = [];
+            $seen_ids = [];
 
-            // البحث داخل قاعدة البيانات مباشرة لتوفير الرام
-            if ($term) {
-                $sql .= " AND (name LIKE ? OR description LIKE ?)";
-                $search_term = "%" . escape_like_search($term) . "%";
-                $params[] = $search_term;
-                $params[] = $search_term;
+            // 1. محاولة الجلب من D1 السحابية (النظام الجديد)
+            try {
+                $sql_d1 = "SELECT * FROM products WHERE merchant_id = ?";
+                $params_d1 = [$user_id];
+
+                if ($term) {
+                    $sql_d1 .= " AND (name LIKE ? OR description LIKE ?)";
+                    $search_term = "%" . escape_like_search($term) . "%";
+                    $params_d1[] = $search_term;
+                    $params_d1[] = $search_term;
+                }
+
+                $sql_d1 .= " ORDER BY updated_at DESC LIMIT ? OFFSET ?";
+                $params_d1[] = $limit;
+                $params_d1[] = $offset;
+
+                $d1_products = d1_request($sql_d1, $params_d1);
+                if (is_array($d1_products)) {
+                    foreach($d1_products as $p) {
+                        $p['options'] = json_decode($p['options'] ?? '[]', true);
+                        if ($user_role === 'delivery') unset($p['cost_price']);
+                        $merged_products[] = $p;
+                        $seen_ids[] = (string)$p['id'];
+                    }
+                }
+            } catch (Exception $e) {
+                // تجاوز الخطأ في حال تعذر الاتصال بـ D1
             }
 
-            $sql .= " ORDER BY updated_at DESC LIMIT ? OFFSET ?";
-            $params[] = $limit;
-            $params[] = $offset;
+            // 2. الدعم العكسي (Legacy MySQL) للمنتجات التي لم تهاجر بعد للنظام الجديد
+            try {
+                $sql_mysql = "
+                    SELECT p.id as global_product_id, p.name, p.mainDescription as description, p.image, p.sizes as options, p.discount,
+                           c.name as type, l.merchant_price as price, l.cost_price, l.quantity, l.quantity_type, l.currency, l.is_available, l.updated_at
+                    FROM merchant_listings l
+                    JOIN products p ON l.global_product_id = p.id
+                    LEFT JOIN categories c ON p.category_id = c.id
+                    WHERE l.merchant_id = ?
+                ";
+                $params_mysql = [$user_id];
 
-            $products = d1_request($sql, $params);
-            
-            // تحويل الـ JSON strings إلى مصفوفات
-            foreach($products as &$p) {
-                $p['options'] = json_decode($p['options'] ?? '[]', true);
-                if ($user_role === 'delivery') unset($p['cost_price']);
-            }
+                if ($term) {
+                    $sql_mysql .= " AND (p.name LIKE ? OR p.mainDescription LIKE ?)";
+                    $search_term = "%" . escape_like_search($term) . "%";
+                    $params_mysql[] = $search_term;
+                    $params_mysql[] = $search_term;
+                }
 
-            // معرفة ما إذا كان هناك صفحات أخرى
-            $has_more = count($products) === $limit;
+                $sql_mysql .= " ORDER BY l.updated_at DESC LIMIT $limit OFFSET $offset";
+                $stmt = $pdo->prepare($sql_mysql);
+                $stmt->execute($params_mysql);
+                $legacy_products = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-            send_response('success',['data' => $products, 'has_more' => $has_more, 'page' => $page]);
-            break;    
+                foreach($legacy_products as $p) {
+                    $pid = (string)$p['global_product_id'];
+                    if (!in_array($pid, $seen_ids)) {
+                        $p['id'] = $pid; // توحيد الـ ID
+                        $p['options'] = json_decode($p['options'] ?? '[]', true);
+                        if ($user_role === 'delivery') unset($p['cost_price']);
+                        $merged_products[] = $p;
+                        $seen_ids[] = $pid;
+                    }
+                }
+            } catch (Exception $e) {}
+
+            // ترتيب زمني للنتائج المدمجة (الأحدث أولاً)
+            usort($merged_products, function($a, $b) {
+                $timeA = isset($a['updated_at']) && is_numeric($a['updated_at']) ? $a['updated_at'] : 0;
+                $timeB = isset($b['updated_at']) && is_numeric($b['updated_at']) ? $b['updated_at'] : 0;
+                return $timeB - $timeA;
+            });
+
+            // قص المصفوفة للتأكد من عدم تجاوز العدد المطلوب في الدفعة
+            $final_products = array_slice($merged_products, 0, $limit);
+            $has_more = count($final_products) >= $limit;
+
+            send_response('success',['data' => $final_products, 'has_more' => $has_more, 'page' => $page]);
+            break;
         case 'get_product':
             if (!$user_id) send_response('error',['message' => 'غير مصرح'], 401);
             
