@@ -1278,17 +1278,21 @@ try {
             break;    
 
         case 'verify_cart_live':
-            $cart_items = $input['items'] ??[];
+            $cart_items = $input['items'] ?? [];
             if (empty($cart_items)) send_response('success', ['can_proceed' => true]);
 
             $changes = [];
-            $new_cart =[];
+            $new_cart = [];
             $can_proceed = true;
 
             foreach ($cart_items as $item) {
-                $stmt = $pdo->prepare("SELECT l.merchant_price, l.quantity, l.quantity_type, l.is_available, p.discount FROM merchant_listings l JOIN products p ON l.global_product_id = p.id WHERE l.id = ?");
-                $stmt->execute([$item['listing_id']]);
-                $db_item = $stmt->fetch(PDO::FETCH_ASSOC);
+                // الاعتماد على product_id لجلب البيانات من D1
+                $product_id = $item['product_id'] ?? $item['listing_id'];
+                $size_id = $item['size_id'] ?? null;
+
+                // 🚀 استعلام مباشر وفوري من Cloudflare D1
+                $d1_res = d1_request("SELECT price, quantity, quantity_type, is_available, discount, options FROM products WHERE id = ?", [$product_id]);
+                $db_item = $d1_res[0] ?? null;
 
                 if (!$db_item || $db_item['is_available'] == 0) {
                     $changes[] = "المنتج '{$item['name']}' نفد أو تم إخفاؤه. تم حذفه من سلتك.";
@@ -1296,16 +1300,48 @@ try {
                     continue; 
                 }
 
-                $real_price = $db_item['merchant_price'] * (1 - ($db_item['discount'] / 100));
+                $available_qty = (int)$db_item['quantity'];
+                $qty_type = $db_item['quantity_type'];
+                $base_price = (float)$db_item['price'];
+
+                // فحص المقاسات والخيارات (إن وجدت) داخل D1
+                if ($size_id && !empty($db_item['options'])) {
+                    $options = json_decode($db_item['options'], true) ?: [];
+                    $found_opt = false;
+                    foreach ($options as $opt) {
+                        if (isset($opt['id']) && $opt['id'] === $size_id) {
+                            if (isset($opt['custom_price']) && $opt['custom_price'] !== '') {
+                                $base_price = (float)$opt['custom_price'];
+                            }
+                            if (($opt['quantity_type'] ?? 'tracked') === 'tracked') {
+                                $available_qty = (int)($opt['quantity'] ?? 0);
+                                $qty_type = 'tracked';
+                            } else {
+                                $qty_type = 'unlimited';
+                            }
+                            $found_opt = true;
+                            break;
+                        }
+                    }
+                    if (!$found_opt) {
+                        $changes[] = "المقاس أو الخيار المختار لـ '{$item['name']}' لم يعد متوفراً.";
+                        $can_proceed = false;
+                        continue;
+                    }
+                }
+
+                // حساب السعر النهائي
+                $real_price = $base_price * (1 - ($db_item['discount'] / 100));
                 if (abs((float)$real_price - (float)$item['price']) > 1) {
                     $changes[] = "تغير سعر '{$item['name']}' من {$item['price']} إلى {$real_price}.";
                     $item['price'] = $real_price;
                     $can_proceed = false;
                 }
 
-                if ($db_item['quantity_type'] === 'tracked' && $db_item['quantity'] < $item['qty']) {
-                    $changes[] = "الكمية المتاحة من '{$item['name']}' هي {$db_item['quantity']} فقط.";
-                    $item['qty'] = $db_item['quantity'];
+                // الفحص الصارم للكمية المطلوبة مقابل D1
+                if ($qty_type === 'tracked' && $available_qty < $item['qty']) {
+                    $changes[] = "الكمية المتاحة من '{$item['name']}' هي {$available_qty} فقط.";
+                    $item['qty'] = $available_qty;
                     if ($item['qty'] <= 0) continue; 
                     $can_proceed = false;
                 }
@@ -1318,7 +1354,7 @@ try {
                 'changes' => $changes,
                 'new_cart' => $new_cart
             ]);
-            break;    
+            break;
 
         case 'get_initial_data':
             $stmt_settings = $pdo->query("SELECT setting_value FROM settings WHERE setting_key = 'store_settings'");
@@ -1773,40 +1809,61 @@ try {
         case 'add_to_cart_db':
             if (!$customer_id) send_response('error',['message' => 'يجب تسجيل الدخول أولاً'], 401);
 
-            $listing_id = intval($input['listing_id'] ?? 0);
+            $listing_id = sanitize_input($input['listing_id'] ?? '');
+            $product_id = sanitize_input($input['product_id'] ?? $listing_id); // الاعتماد على الـ ID العالمي
             $quantity = max(1, intval($input['quantity'] ?? 1));
             $size_id = sanitize_input($input['sizeId'] ?? null);
 
-            if ($listing_id <= 0) {
+            if (empty($product_id)) {
                 throw new Exception("معرّف المنتج غير صالح.");
             }
             
-            $stmt_listing = $pdo->prepare(
-                "SELECT merchant_id, global_product_id, quantity as stock, quantity_type 
-                 FROM merchant_listings 
-                 WHERE id = ? AND is_available = 1"
-            );
-            $stmt_listing->execute([$listing_id]);
-            $listing = $stmt_listing->fetch(PDO::FETCH_ASSOC);
+            // 🚀 استعلام فوري من Cloudflare D1 لجلب الكمية الحقيقية اللحظية
+            $d1_res = d1_request("SELECT merchant_id, id as global_product_id, quantity, quantity_type, is_available, options FROM products WHERE id = ?", [$product_id]);
+            $listing = $d1_res[0] ?? null;
 
-            if (!$listing) {
+            if (!$listing || $listing['is_available'] == 0) {
                 throw new Exception("هذا المنتج غير متاح للبيع من هذا التاجر حالياً.");
             }
 
             $merchant_id = $listing['merchant_id'];
             $global_product_id = $listing['global_product_id'];
 
-            try { 
-                $pdo->exec("ALTER TABLE `user_cart` ADD COLUMN `listing_id` INT(11) NULL AFTER `product_id`, ADD COLUMN `merchant_id` INT(11) NULL AFTER `user_id`, ADD UNIQUE KEY `customer_item_unique` (`customer_id`, `listing_id`, `size_id`);"); 
-            } catch (PDOException $e) {}
-            try { $pdo->exec("UPDATE user_cart SET merchant_id = user_id WHERE merchant_id IS NULL AND user_id IS NOT NULL;"); } catch (PDOException $e) {}
+            // تحديد الكمية المتاحة (للمنتج العادي أو للخيارات والمقاسات)
+            $available_qty = (int)$listing['quantity'];
+            $qty_type = $listing['quantity_type'];
 
-            $stmt_cart_qty = $pdo->prepare("SELECT quantity FROM user_cart WHERE customer_id = ? AND listing_id = ? AND (size_id <=> ?)");
-            $stmt_cart_qty->execute([$customer_id, $listing_id, $size_id]);
+            if ($size_id && !empty($listing['options'])) {
+                $options = json_decode($listing['options'], true) ?: [];
+                $found_opt = false;
+                foreach ($options as $opt) {
+                    if (isset($opt['id']) && $opt['id'] === $size_id) {
+                        if (($opt['quantity_type'] ?? 'tracked') === 'tracked') {
+                            $available_qty = (int)($opt['quantity'] ?? 0);
+                            $qty_type = 'tracked';
+                        } else {
+                            $qty_type = 'unlimited';
+                        }
+                        $found_opt = true;
+                        break;
+                    }
+                }
+                if (!$found_opt) throw new Exception("المقاس أو الخيار المحدد غير موجود.");
+            }
+
+            // تحديث هيكل السلة إذا لم يكن محدثاً
+            try { 
+                $pdo->exec("ALTER TABLE `user_cart` ADD COLUMN `listing_id` VARCHAR(100) NULL AFTER `product_id`, ADD COLUMN `merchant_id` INT(11) NULL AFTER `user_id`"); 
+                $pdo->exec("ALTER TABLE `user_cart` ADD UNIQUE KEY IF NOT EXISTS `customer_item_unique` (`customer_id`, `product_id`, `size_id`)");
+            } catch (PDOException $e) {}
+
+            $stmt_cart_qty = $pdo->prepare("SELECT quantity FROM user_cart WHERE customer_id = ? AND product_id = ? AND (size_id <=> ?)");
+            $stmt_cart_qty->execute([$customer_id, $product_id, $size_id]);
             $current_cart_qty = (int)$stmt_cart_qty->fetchColumn();
             
-            if ($listing['quantity_type'] === 'tracked' && ($current_cart_qty + $quantity) > $listing['stock']) {
-                throw new Exception("عذراً، الكمية المطلوبة غير متوفرة في المخزون لهذا المنتج.");
+            // الفحص الصارم للمخزون
+            if ($qty_type === 'tracked' && ($current_cart_qty + $quantity) > $available_qty) {
+                throw new Exception("عذراً، الكمية المطلوبة غير متوفرة في المخزون (المتاح فعلياً: $available_qty).");
             }
 
             $sql = "INSERT INTO user_cart (customer_id, product_id, listing_id, user_id, merchant_id, size_id, quantity) 
@@ -1816,7 +1873,7 @@ try {
             $stmt_insert = $pdo->prepare($sql);
             $stmt_insert->execute([$customer_id, $global_product_id, $listing_id, $merchant_id, $merchant_id, $size_id, $quantity]);
 
-            send_response('success',['message' => 'تمت الإضافة للسلة']);
+            send_response('success',['message' => 'تمت الإضافة للسلة بنجاح']);
             break;
 
         case 'remove_from_cart_db':
