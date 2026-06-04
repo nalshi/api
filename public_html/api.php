@@ -2334,7 +2334,7 @@ if (!$listing || $listing['is_available'] == 0) {
                 throw $e;
             }
 
-            // ========================================================
+       // ========================================================
             // 7. خصم المخزون من D1 وإرسال الطلبات لـ Firebase (Post-Processing)
             // ========================================================
             try {
@@ -2343,6 +2343,9 @@ if (!$listing || $listing['is_available'] == 0) {
                     $m_id = $tick['merchant_id'];
                     $fb_products_update = kv_request("stores/$m_username/products") ?: []; // لعمل تزامن للـ KV/Firebase لاحقاً
                     
+                    // ⭐ التعديل الجديد: متغير للتحكم، لا نحدث جيت هاب إلا إذا نفدت كمية منتج
+                    $needs_github_sync = false; 
+
                     foreach ($tick['original_items_to_deduct'] as $item) {
                         $pid = $item['product_id'];
                         
@@ -2362,7 +2365,7 @@ if (!$listing || $listing['is_available'] == 0) {
                                 
                                 $opts_json = json_encode($options_array, JSON_UNESCAPED_UNICODE);
                                 
-                                // تحديث D1 للخيارات
+                                // تحديث D1 للخيارات (هذا يحدث دائماً في قاعدة البيانات لضمان دقة المخزون)
                                 d1_request("UPDATE products SET quantity = ?, options = ?, updated_at = ? WHERE id = ? AND merchant_id = ?",
                                     [$total_remaining_qty, $opts_json, time(), $pid, $m_id]);
                                     
@@ -2370,6 +2373,12 @@ if (!$listing || $listing['is_available'] == 0) {
                                 if(isset($fb_products_update[$pid])) {
                                     $fb_products_update[$pid]['quantity'] = $total_remaining_qty;
                                     $fb_products_update[$pid]['options'] = $options_array;
+
+                                    // ⭐ إذا نفدت الكمية تماماً، نحذف المنتج من العرض ونفعل التحديث
+                                    if ($total_remaining_qty <= 0) {
+                                        unset($fb_products_update[$pid]);
+                                        $needs_github_sync = true;
+                                    }
                                 }
                             } else {
                                 // تحديث D1 للمنتج العادي
@@ -2377,15 +2386,25 @@ if (!$listing || $listing['is_available'] == 0) {
                                     [$item['quantity'], time(), $pid, $m_id]);
                                     
                                 if(isset($fb_products_update[$pid])) {
-                                    $fb_products_update[$pid]['quantity'] = max(0, $item['current_db_qty'] - $item['quantity']);
+                                    $new_qty = max(0, $item['current_db_qty'] - $item['quantity']);
+                                    $fb_products_update[$pid]['quantity'] = $new_qty;
+
+                                    // ⭐ إذا نفدت الكمية تماماً، نحذف المنتج من العرض ونفعل التحديث
+                                    if ($new_qty <= 0) {
+                                        unset($fb_products_update[$pid]);
+                                        $needs_github_sync = true;
+                                    }
                                 }
                             }
                         }
                     }
 
-                    // تحديث KV / Firebase لتبقى واجهة الزبائن الحالية محدثة
-                   kv_request("stores/$m_username/products", 'PUT', $fb_products_update);
-build_and_sync_split_json($m_username, $fb_products_update);
+                    // ⭐ التحديث الذكي: لن يتم رفع أي شيء لـ GitHub إلا إذا نفدت كمية منتج وتم حذفه
+                    if ($needs_github_sync) {
+                        kv_request("stores/$m_username/products", 'PUT', $fb_products_update);
+                        build_and_sync_split_json($m_username, $fb_products_update);
+                    }
+
                     // دفع الطلب إلى Firebase ليظهر في لوحة التاجر الحية
                     $merchant_secret_hash = md5($m_id . APP_SECRET_KEY . 'orders');
                     $fb_order_data = $tick['ticket_data'];
