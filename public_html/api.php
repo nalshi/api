@@ -1058,15 +1058,31 @@ try {
     $user_id = $user_id ?? $_SESSION['user_id'] ?? null;
     $customer_id = $customer_id ?? $_SESSION['customer_id'] ?? null;
 
+    // التقاط الـ Token من الـ Payload إذا كان موجوداً
+    $jwt_device_token = null;
+    if (isset($payload) && is_array($payload) && isset($payload['device_token'])) {
+        $jwt_device_token = $payload['device_token'];
+    }
+
     if ($user_id && in_array($user_role,['merchant', 'delivery', 'admin'])) {
-        $current_device_token = $_COOKIE['device_token'] ?? null;
-        if ($current_device_token) {
+        // الاعتماد على الكوكي، وإذا لم يوجد نأخذه من الـ JWT Token
+        $current_device_token = $_COOKIE['device_token'] ?? $jwt_device_token;
+        
+        // حفظه في الجلسة لاستخدامه عند تغيير الباسورد
+        if ($current_device_token) $_SESSION['current_device_token'] = $current_device_token;
+
+        if (empty($current_device_token)) {
+            // طرد مباشر: يمنع أي محاولة دخول بدون بصمة الجهاز
+            session_unset(); session_destroy();
+            send_response('error',['message' => 'جلسة غير صالحة أو غير مكتملة. يرجى إعادة تسجيل الدخول.'], 401);
+        } else {
+            // التحقق الصارم والإجباري من قاعدة البيانات في كل طلب
             $stmt_check_dev = $pdo->prepare("SELECT id FROM trusted_devices WHERE user_id = ? AND device_token = ?");
             $stmt_check_dev->execute([$user_id, $current_device_token]);
             if (!$stmt_check_dev->fetchColumn()) {
                 session_unset(); session_destroy();
                 setcookie('device_token', '', time() - 3600, '/');
-                send_response('error',['message' => 'تم إنهاء هذه الجلسة عن بعد. يرجى تسجيل الدخول مجدداً.'], 401);
+                send_response('error',['message' => 'تم تغيير كلمة المرور أو إنهاء هذه الجلسة عن بعد. يرجى تسجيل الدخول مجدداً.'], 401);
             }
         }
     }
@@ -2676,7 +2692,7 @@ if (!$listing || $listing['is_available'] == 0) {
             $_SESSION['device_token'] = $_COOKIE['device_token'] ?? '';
             unset($_SESSION['login_selection_data']);
             
-            $payload =['user_id' => $user['id'], 'username' => $user['username'], 'store_name' => $user['store_name'], 'role' => $user['role']];
+            $payload =['user_id' => $user['id'], 'username' => $user['username'], 'store_name' => $user['store_name'], 'role' => $user['role'], 'device_token' => $_COOKIE['device_token'] ?? ''];
             if (!defined('APP_SECRET_KEY')) define('APP_SECRET_KEY', 'nalsh_fallback_secret_9988');
             $token = generate_signed_token($payload, 480);
             
@@ -2809,7 +2825,8 @@ if (!$listing || $listing['is_available'] == 0) {
                     'user_id' => $user['id'], 
                     'username' => $user['username'],
                     'store_name' => $user['store_name'], 
-                    'role' => $user['role']
+                    'role' => $user['role'],
+                    'device_token' => $device_token // إضافة بصمة الجهاز
                 ];
                 $payload['firebase_secret_path'] = md5($user['id'] . APP_SECRET_KEY . 'orders');                   
                 
@@ -2891,7 +2908,7 @@ if (!$listing || $listing['is_available'] == 0) {
                 $_SESSION['role'] = $user['role'];
                 $_SESSION['device_token'] = $new_device_token;
                 
-                $payload = ['user_id' => $user['id'], 'username' => $user['username'], 'store_name' => $user['store_name'], 'role' => $user['role']];
+                $payload = ['user_id' => $user['id'], 'username' => $user['username'], 'store_name' => $user['store_name'], 'role' => $user['role'], 'device_token' => $new_device_token];
                 if (!defined('APP_SECRET_KEY')) define('APP_SECRET_KEY', 'nalsh_fallback_secret_9988');
                 $token = generate_signed_token($payload, 480);
                 
@@ -4306,12 +4323,18 @@ if (!$listing || $listing['is_available'] == 0) {
             if (!password_verify($current, $stmt->fetchColumn())) throw new Exception("كلمة المرور الحالية خاطئة.");
             if (strlen($new) < 8) throw new Exception("كلمة المرور الجديدة قصيرة جداً.");
             $hashed = password_hash($new, PASSWORD_DEFAULT);
-            $pdo->prepare("UPDATE users SET password = ? WHERE id = ?")->execute([$hashed, $user_id]);
             
-            $current_device_token = $_COOKIE['device_token'] ?? '';
+            // تحديث كلمة المرور وتسجيل وقت التحديث
+            try { $pdo->exec("ALTER TABLE users ADD COLUMN password_changed_at DATETIME NULL"); } catch(Exception $e){}
+            $pdo->prepare("UPDATE users SET password = ?, password_changed_at = NOW() WHERE id = ?")->execute([$hashed, $user_id]);
+            
+            // جلب بصمة الجهاز الحالي الذي قام بتغيير الباسورد لكي لا يتم طرده
+            $current_device_token = $_SESSION['current_device_token'] ?? $_COOKIE['device_token'] ?? '';
+            
+            // حذف جـمـيـع الأجهزة والجلسات السابقة المرتبطة بهذا التاجر باستثناء جهازه الحالي
             $pdo->prepare("DELETE FROM trusted_devices WHERE user_id = ? AND device_token != ?")->execute([$user_id, $current_device_token]);
 
-            send_response('success',['message' => 'تم تحديث كلمة المرور بنجاح. تم تسجيل الخروج من الأجهزة الأخرى.']);
+            send_response('success',['message' => 'تم تحديث كلمة المرور بنجاح. تم طرد وتسجيل الخروج من جميع الأجهزة الأخرى فوراً.']);
             break;
 
         case 'get_customers':
