@@ -1931,13 +1931,34 @@ if (!$listing || $listing['is_available'] == 0) {
 
                 $total_requested_qty += $qty;
                 
-                // ⭐ إصلاح ذكي 1: التقاط معرف التاجر بأي شكل كان مبرمجاً في السلة (ID أو Username)
-                $m_id = $c_item['merchant_id'] ?? $c_item['user_id'] ?? $c_item['merchant_username'] ?? null;
-                if ($m_id === 'null' || $m_id === 'undefined' || $m_id === '') $m_id = null;
+                // ⭐ إصلاح ذكي 1: التقاط معرف التاجر بأي شكل كان مبرمجاً في السلة (ID أو Username)$m_id = $c_item['merchant_id'] ?? $c_item['user_id'] ?? $c_item['merchant_username'] ?? null;
+if ($m_id === 'null' || $m_id === 'undefined' || $m_id === '') $m_id = null;
 
-                if (!$m_id) {
-                    throw new Exception("بيانات التاجر مفقودة للمنتج: " . ($c_item['name'] ?? 'غير معروف') . ". يرجى حذفه وإضافته مجدداً.");
-                }
+// ⭐ التعديل الذكي: إذا السلة لم ترسل رقم التاجر، نسحبه فوراً من D1 أو MySQL
+if (!$m_id) {
+    $product_id = $c_item['product_id'] ?? $c_item['listing_id'] ?? $c_item['id'] ?? null;
+    if ($product_id) {
+        try {
+            // محاولة الجلب من D1
+            $d1_res = d1_request("SELECT merchant_id FROM products WHERE id = ?", [$product_id]);
+            $m_id = $d1_res[0]['merchant_id'] ?? null;
+        } catch (Exception $e) {}
+        
+        // الدعم العكسي من MySQL
+        if (!$m_id) {
+            $stmt_find_m = $pdo->prepare("SELECT merchant_id FROM merchant_listings WHERE global_product_id = ? OR id = ?");
+            $stmt_find_m->execute([$product_id, $product_id]);
+            $m_id = $stmt_find_m->fetchColumn();
+        }
+    }
+}
+
+if (!$m_id) {
+    throw new Exception("عذراً، المنتج '" . ($c_item['name'] ?? 'غير معروف') . "' لم يعد متاحاً. يرجى حذفه من السلة.");
+}
+
+// إعادة تعيين المتغير في المصفوفة ليتم استخدامه بشكل صحيح في باقي الكود
+$c_item['merchant_id'] = $m_id;
                 
                 $grouped_by_merchant[$m_id][] = $c_item;
             }
