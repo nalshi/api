@@ -718,10 +718,18 @@ function sync_merchant_info_json($pdo, $user_id, $merchant_username) {
         'settings'   => $settings 
     ];
 
-    // 1. رفع ملف info.json إلى GitHub
+    // 1. رفع ملف info إلى Cloudflare KV (الإضافة الجديدة ⭐)
+    try {
+        kv_request("stores/$merchant_username/info", 'PUT', $info_data);
+    } catch (Exception $e) {
+        // نتجاوز الخطأ بصمت حتى لا يتوقف الرفع إلى GitHub إذا تعطل الـ KV
+        error_log("KV Sync Error for Info: " . $e->getMessage());
+    }
+
+    // 2. رفع ملف info.json إلى GitHub
     sync_to_github("stores/$merchant_username/info.json", $info_data, 'PUT', "Update store info v$timestamp");
 
-    // 2. تحديث المانيفست على GitHub
+    // 3. تحديث المانيفست على GitHub
     $gh_owner = getenv('GITHUB_REPO_OWNER') ?: $_ENV['GITHUB_REPO_OWNER'] ?? '';
     $gh_repo  = getenv('GITHUB_REPO_NAME') ?: $_ENV['GITHUB_REPO_NAME'] ?? '';
     $gh_token = getenv('GITHUB_TOKEN') ?: $_ENV['GITHUB_TOKEN'] ?? '';
@@ -740,7 +748,13 @@ function sync_merchant_info_json($pdo, $user_id, $merchant_username) {
     if (!isset($current_manifest['files'])) $current_manifest['files'] = [];
     $current_manifest['files']['info'] = $timestamp;
 
+    // رفع المانيفست الجديد إلى GitHub
     sync_to_github("stores/$merchant_username/manifest.json", $current_manifest, 'PUT', "Update manifest with info v$timestamp");
+    
+    // رفع المانيفست الجديد إلى Cloudflare KV (لضمان التزامن التام ⭐)
+    try {
+        kv_request("stores/$merchant_username/manifest", 'PUT', $current_manifest);
+    } catch (Exception $e) {}
 }
 function reassign_stale_orders($pdo) {
     try {
@@ -1916,8 +1930,14 @@ if (!$listing || $listing['is_available'] == 0) {
                 if ($qty > $MAX_QTY_PER_ITEM) throw new Exception("عذراً، لا يمكنك طلب أكثر من {$MAX_QTY_PER_ITEM} وحدة من نفس المنتج.");
 
                 $total_requested_qty += $qty;
-                $m_id = $c_item['merchant_id'] ?? null;
-                if (!$m_id) throw new Exception("بيانات التاجر مفقودة لبعض المنتجات.");
+                
+                // ⭐ إصلاح ذكي 1: التقاط معرف التاجر بأي شكل كان مبرمجاً في السلة (ID أو Username)
+                $m_id = $c_item['merchant_id'] ?? $c_item['user_id'] ?? $c_item['merchant_username'] ?? null;
+                if ($m_id === 'null' || $m_id === 'undefined' || $m_id === '') $m_id = null;
+
+                if (!$m_id) {
+                    throw new Exception("بيانات التاجر مفقودة للمنتج: " . ($c_item['name'] ?? 'غير معروف') . ". يرجى حذفه وإضافته مجدداً.");
+                }
                 
                 $grouped_by_merchant[$m_id][] = $c_item;
             }
@@ -1929,17 +1949,31 @@ if (!$listing || $listing['is_available'] == 0) {
             $merchant_locations = [];
             $merchant_details = [];
 
-            foreach (array_keys($grouped_by_merchant) as $m_id) {
-                $stmt_merchant = $pdo->prepare("SELECT id, username, store_name, settings FROM users WHERE id = ?");
-                $stmt_merchant->execute([$m_id]);
+            // نحتفظ بالمفاتيح الأصلية للتعامل معها بأمان
+            $raw_merchant_ids = array_keys($grouped_by_merchant);
+
+            foreach ($raw_merchant_ids as $raw_m_id) {
+                // ⭐ إصلاح ذكي 2: البحث عن التاجر سواء كان الممرر ID رقمي أو Username نصي
+                $stmt_merchant = $pdo->prepare("SELECT id, username, store_name, settings FROM users WHERE id = ? OR username = ?");
+                $stmt_merchant->execute([$raw_m_id, $raw_m_id]);
                 $m_info = $stmt_merchant->fetch(PDO::FETCH_ASSOC);
                 
-                if (!$m_info) throw new Exception("أحد المتاجر المطلوبة لم يعد متاحاً.");
+                if (!$m_info) {
+                    throw new Exception("المتجر غير موجود أو غير متاح حالياً (المعرف: $raw_m_id). يرجى إزالة منتجاته من السلة.");
+                }
                 
-                $merchant_details[$m_id] = $m_info;
+                $actual_m_id = $m_info['id'];
+
+                // إذا كان الممرر Username، نقوم بتصحيحه في المصفوفة ليصبح ID رقمي لكي لا تتعطل باقي الأكواد
+                if ((string)$raw_m_id !== (string)$actual_m_id) {
+                    $grouped_by_merchant[$actual_m_id] = $grouped_by_merchant[$raw_m_id];
+                    unset($grouped_by_merchant[$raw_m_id]);
+                }
+
+                $merchant_details[$actual_m_id] = $m_info;
                 $m_settings = json_decode($m_info['settings'] ?: '{}', true);
                 $m_coords = extract_coords_from_url($m_settings['location'] ?? null);
-                if ($m_coords) $merchant_locations[$m_id] = $m_coords;
+                if ($m_coords) $merchant_locations[$actual_m_id] = $m_coords;
             }
 
             if ($customer_coords && count($merchant_locations) > 0) {
@@ -1969,13 +2003,13 @@ if (!$listing || $listing['is_available'] == 0) {
                 $m_info = $merchant_details[$merchant_id];
                 $m_settings = json_decode($m_info['settings'] ?: '{}', true);
                 
-                // جلب المنتجات الحقيقية من D1 بناءً على Merchant ID
-                // تجهيز معرفات المنتجات
-                $product_ids = array_map(function($i) { return $i['product_id'] ?? $i['listing_id']; }, $items);
+                // ⭐ إصلاح ذكي 3: سحب معرف المنتج بشكل دقيق أياً كان اسمه في السلة
+                $product_ids = array_map(function($i) { return $i['product_id'] ?? $i['listing_id'] ?? $i['id']; }, $items);
                 $placeholders = implode(',', array_fill(0, count($product_ids), '?'));
                 $params = array_merge([$merchant_id], $product_ids);
 
                 $d1_products = [];
+                $d1_error = null;
 
                 // 1. محاولة جلب المنتجات من Cloudflare D1
                 try {
@@ -1986,7 +2020,8 @@ if (!$listing || $listing['is_available'] == 0) {
                         $d1_products[$row['id']] = $row;
                     }
                 } catch (Exception $e) {
-                    // تجاهل الخطأ للبحث في MySQL
+                    // ⭐ التقاط خطأ السحابة بدلاً من تجاهله لمعرفة سبب المشكلة
+                    $d1_error = $e->getMessage();
                 }
 
                 // 2. الدعم العكسي: جلب المنتجات من MySQL (merchant_listings) إذا كانت مفقودة
@@ -1998,7 +2033,6 @@ if (!$listing || $listing['is_available'] == 0) {
                     WHERE l.merchant_id = ? AND (l.id IN ($placeholders) OR p.id IN ($placeholders))
                 ";
                 $stmt_pdo = $pdo->prepare($pdo_sql);
-                // مصفوفة معاملات مكررة لتتناسب بدقة مع علامات الاستفهام المتكررة
                 $params_pdo = array_merge([$merchant_id], $product_ids, $product_ids);
                 $stmt_pdo->execute($params_pdo);
                 $pdo_results = $stmt_pdo->fetchAll(PDO::FETCH_ASSOC);
@@ -2010,7 +2044,6 @@ if (!$listing || $listing['is_available'] == 0) {
                     $row['id'] = $pid; // توحيد المفتاح ليكون مطابق للطلب
                     $row['options'] = json_decode($row['options'] ?? '[]', true) ?: [];
                     
-                    // دمج المنتجات القديمة مع الجديدة لتجاوز خطأ "المنتج غير موجود"
                     if (!isset($d1_products[$pid])) $d1_products[$pid] = $row;
                     if (!isset($d1_products[$lid])) $d1_products[$lid] = $row;
                 }
@@ -2021,10 +2054,13 @@ if (!$listing || $listing['is_available'] == 0) {
                 $merchant_item_count = 0;
 
                 foreach ($items as $item) {
-                    $product_id = $item['product_id'] ?? $item['listing_id'];
+                    // الاعتماد على المعرف الذي تم العثور عليه
+                    $product_id = $item['product_id'] ?? $item['listing_id'] ?? $item['id'];
                     
                     if (!isset($d1_products[$product_id])) {
-                        throw new Exception("المنتج '{$item['name']}' نفد أو تم حذفه من متجر {$m_info['store_name']}.");
+                        $err_msg = "المنتج '{$item['name']}' نفد أو تم حذفه من متجر {$m_info['store_name']}.";
+                        if ($d1_error) $err_msg .= " (ملاحظة للسيرفر: $d1_error)";
+                        throw new Exception($err_msg);
                     }
                     
                     $product = $d1_products[$product_id];
@@ -3598,6 +3634,9 @@ if (!$listing || $listing['is_available'] == 0) {
             if ($m_data) {
                 $m_data['settings'] = json_decode($m_data['settings'] ?: '{}', true);
                 sync_to_firebase($m_username, 'info', null, $m_data, 'PUT');
+                
+                // ⭐ إضافة مهمة: إجبار تحديث ملف info.json على GitHub أيضاً
+                sync_merchant_info_json($pdo, $user_id, $m_username);
             }
 
             $sql_prods = "SELECT p.id as global_product_id, p.name, p.mainDescription as description, p.image, p.sizes as options, p.discount, p.department, p.category_id, l.id as listing_id, l.merchant_price as price, l.quantity, l.quantity_type, l.currency, c.name as type, u.id as merchant_id, u.username as merchant_username, u.store_name as merchant_name FROM merchant_listings l JOIN products p ON l.global_product_id = p.id JOIN users u ON l.merchant_id = u.id LEFT JOIN categories c ON p.category_id = c.id WHERE l.merchant_id = ? AND l.is_available = 1";
@@ -4670,14 +4709,16 @@ if (!$listing || $listing['is_available'] == 0) {
             $json_settings = json_encode($final_settings, JSON_UNESCAPED_UNICODE);
             
             // استدعاء الدالة الجديدة لتوليد info.json ورفعه مع المانيفست
-            sync_merchant_info_json($pdo, $user_id, $merchant_username);     
-            
+            // 1. أولاً: نقوم بتحديث قاعدة البيانات بالبيانات الجديدة
             $stmt_update->execute([
                 $storeName, 
                 $storeType ?: $user_record['store_type'], 
                 $json_settings, 
                 $user_id
             ]);
+
+            // 2. ثانياً: نستدعي الدالة لتقرأ البيانات الجديدة من القاعدة وترفعها لـ GitHub
+            sync_merchant_info_json($pdo, $user_id, $merchant_username);
 
             send_response('success', [
                 'message' => 'تم حفظ الإعدادات وتحديث المتجر بنجاح ✅',
