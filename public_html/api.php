@@ -688,16 +688,14 @@ function update_order_tracking($merchant_username, $order_id, $status) {
 }
 
 function calculate_delivery_fee($distance_km) {
-    $base_fee = 1000;
-    $base_distance_km = 5;
-    $fee_per_km_extra = 150;
-    $rounding_factor = 50;
-    if ($distance_km <= $base_distance_km) {
-        $total_fee = $base_fee;
-    } else {
-        $extra_distance = $distance_km - $base_distance_km;
-        $total_fee = $base_fee + ($extra_distance * $fee_per_km_extra);
-    }
+    $base_fee = 300; // السعر الأساسي الثابت
+    $fee_per_km = 100; // السعر لكل كيلومتر
+    $rounding_factor = 50; // التقريب لأقرب 50 ريال لتجنب الكسور في الحساب
+    
+    // حساب الإجمالي: (300) + (المسافة * 100)
+    $total_fee = $base_fee + ($distance_km * $fee_per_km);
+    
+    // تقريب الرقم النهائي (مثلاً 520 تصبح 550)
     return ceil($total_fee / $rounding_factor) * $rounding_factor;
 }
 function sync_merchant_info_json($pdo, $user_id, $merchant_username) {
@@ -1694,22 +1692,39 @@ try {
 
         case 'get_user_data':
             if (!$customer_id) send_response('error',['message' => 'غير مسجل دخول'], 401);
-            $sql = "SELECT c.id, c.product_id, c.size_id, c.quantity, p.name, p.price, p.discount, p.image, p.sizes FROM user_cart c JOIN products p ON c.product_id = p.id WHERE c.customer_id = ?";
-            $stmt = $pdo->prepare($sql); $stmt->execute([$customer_id]); $cart_items = $stmt->fetchAll(PDO::FETCH_ASSOC);
+            
+            // تم التعديل لجلب merchant_id و listing_id واسم المتجر
+            $sql = "SELECT c.id, c.product_id, c.listing_id, c.merchant_id, c.size_id, c.quantity, 
+                           p.name, p.price, p.discount, p.image, p.sizes, 
+                           u.store_name as merchant_name 
+                    FROM user_cart c 
+                    JOIN products p ON c.product_id = p.id 
+                    LEFT JOIN users u ON c.merchant_id = u.id 
+                    WHERE c.customer_id = ?";
+                    
+            $stmt = $pdo->prepare($sql); 
+            $stmt->execute([$customer_id]); 
+            $cart_items = $stmt->fetchAll(PDO::FETCH_ASSOC);
+            
             foreach ($cart_items as &$item) {
                 if ($item['size_id'] && $item['sizes']) {
                     $options_data = json_decode($item['sizes'], true);
                     if (is_array($options_data)) {
                         foreach ($options_data as $option) {
                             if (isset($option['id']) && $option['id'] === $item['size_id']) {
-                                $item['size_name'] = $option['name'] ?? ($option['size_name'] ?? ''); $item['size_image'] = $option['image']; break;
+                                $item['size_name'] = $option['name'] ?? ($option['size_name'] ?? ''); 
+                                $item['size_image'] = $option['image'] ?? null; 
+                                break;
                             }
                         }
                     }
-                } unset($item['sizes']);
+                } 
+                unset($item['sizes']);
             }
+            
             $fav = $pdo->prepare("SELECT product_id FROM user_favorites WHERE customer_id = ?"); 
             $fav->execute([$customer_id]);
+            
             send_response('success',['cart' => $cart_items, 'favorites' => $fav->fetchAll(PDO::FETCH_COLUMN)]);
             break;
 
