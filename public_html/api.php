@@ -53,12 +53,8 @@ header("Cache-Control: no-store, no-cache, must-revalidate, max-age=0");
 
 // 1. الجدار الناري الصارم: تحديد النطاقات المسموحة فقط
 $allowed_origins = [
-    'http://vay.rf.gd',
-    'https://vay.rf.gd',
-    'https://nnny.pages.dev',
-    'https://api-ylin.onrender.com', // السماح لسيرفر Render نفسه
-    'http://localhost',
-    'http://127.0.0.1'
+    'https://nyy.nyy.publicvm.com',
+    
 ];
 
 $request_origin = $_SERVER['HTTP_ORIGIN'] ?? '';
