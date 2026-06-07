@@ -1,6 +1,6 @@
 <?php
 // إعداداتك (ضعها هنا للتجربة)
-$worker_url = "https://ny.nasermsasalah.workers.dev/stores/test_user/info";
+$worker_url = "https://ny.nasermsasalsh.workers.dev/stores/test_user/info";
 $worker_secret = "Naser_KV_Secure_998877_XyZ"; // WORKER_SECRET
 
 $data = ["message" => "Hello KV", "time" => time()];
