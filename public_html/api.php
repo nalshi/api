@@ -174,8 +174,10 @@ function sync_to_firebase($merchant_username, $node, $item_id, $data, $method = 
     $fb_url = getenv('FIREBASE_DB_URL') ?: $_ENV['FIREBASE_DB_URL'] ?: 'https://shiban-a2757-default-rtdb.europe-west1.firebasedatabase.app/';
     $fb_secret = getenv('FIREBASE_DB_SECRET') ?: $_ENV['FIREBASE_DB_SECRET'] ?: ''; 
 
-    if (empty($fb_secret)) return; 
-
+    if (empty($fb_secret)) {
+    error_log("Firebase Sync Error: FIREBASE_DB_SECRET is missing!");
+    return; 
+}
     $safe_username = preg_replace('/[^a-zA-Z0-9_]/', '_', $merchant_username);
     
     $path = $item_id ? "/$node/$item_id.json" : "/$node.json";
@@ -3099,7 +3101,11 @@ $c_item['merchant_id'] = $m_id;
                 'products' => [] 
             ];
 
-            $ch = curl_init(FIREBASE_URL . "stores/" . $merchant_username . ".json?auth=" . FIREBASE_SECRET);
+            $fb_url = getenv('FIREBASE_DB_URL') ?: $_ENV['FIREBASE_DB_URL'] ?: 'https://shiban-a2757-default-rtdb.europe-west1.firebasedatabase.app/';
+if (substr($fb_url, -1) !== '/') $fb_url .= '/';
+$fb_secret = getenv('FIREBASE_DB_SECRET') ?: $_ENV['FIREBASE_DB_SECRET'] ?: '';
+
+$ch = curl_init($fb_url . "stores/" . $merchant_username . ".json?auth=" . $fb_secret);
             curl_setopt($ch, CURLOPT_CUSTOMREQUEST, "PUT");
             curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($initData, JSON_UNESCAPED_UNICODE));
             curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
