@@ -245,7 +245,8 @@ function fb_request($path, $method = 'GET', $data = null) {
 // 🚀 نظام المزامنة الفائقة مع Cloudflare KV Storage
 // =======================================================
 function kv_request($path, $method = 'GET', $data = null) {
-    $kv_url = getenv('WORKER_CDN_URL') ?: $_SERVER['WORKER_CDN_URL'] ?? 'https://ny.nasermsasalah.workers.dev/';
+    // تم إضافة getenv('WORKER_D1_URL') كبديل تلقائي لتلافي اختلاف المسميات في السيرفر ⭐
+    $kv_url = getenv('WORKER_CDN_URL') ?: getenv('WORKER_D1_URL') ?: $_SERVER['WORKER_CDN_URL'] ?? 'https://ny.nasermsasalsh.workers.dev/';
     if (substr($kv_url, -1) !== '/') $kv_url .= '/';
     
     $kv_secret = getenv('WORKER_SECRET') ?: $_SERVER['WORKER_SECRET'] ?? ''; 
