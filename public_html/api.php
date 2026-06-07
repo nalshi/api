@@ -171,31 +171,31 @@ $fb_secret = getenv('FIREBASE_DB_SECRET') ?: $_ENV['FIREBASE_DB_SECRET'] ?: '';
 // 🚀 دالة المزامنة الشاملة مع Firebase (محمية ومطورة)
 // =======================================================
 function sync_to_firebase($merchant_username, $node, $item_id, $data, $method = 'PUT') {
-    $fb_url = getenv('FIREBASE_DB_URL') ?: $_ENV['FIREBASE_DB_URL'] ?: 'https://shiban-a2757-default-rtdb.europe-west1.firebasedatabase.app/';
-    $fb_secret = getenv('FIREBASE_DB_SECRET') ?: $_ENV['FIREBASE_DB_SECRET'] ?: ''; 
+    // 1. تنظيف الرابط وضمان وجود الشرطة المائلة
+    $fb_url = rtrim(getenv('FIREBASE_DB_URL') ?: $_ENV['FIREBASE_DB_URL'] ?: 'https://shiban-a2757-default-rtdb.europe-west1.firebasedatabase.app/', '/');
+    $fb_secret = getenv('FIREBASE_DB_SECRET') ?: $_ENV['FIREBASE_DB_SECRET'] ?: '';
 
-    if (empty($fb_secret)) {
-    error_log("Firebase Sync Error: FIREBASE_DB_SECRET is missing!");
-    return; 
-}
+    if (empty($fb_secret)) return;
+
     $safe_username = preg_replace('/[^a-zA-Z0-9_]/', '_', $merchant_username);
-    
     $path = $item_id ? "/$node/$item_id.json" : "/$node.json";
-    $url = $fb_url . "stores/" . $safe_username . $path . "?auth=" . $fb_secret;
+    
+    // 2. تجميع الرابط بشكل صحيح 100%
+    $url = $fb_url . "/stores/" . $safe_username . $path . "?auth=" . $fb_secret;
 
     $ch = curl_init();
     curl_setopt($ch, CURLOPT_URL, $url);
     curl_setopt($ch, CURLOPT_CUSTOMREQUEST, $method);
     if ($method !== 'DELETE') {
         curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data, JSON_UNESCAPED_UNICODE));
+        curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
     }
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
     curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
-    curl_setopt($ch, CURLOPT_TIMEOUT, 2); 
+    curl_setopt($ch, CURLOPT_TIMEOUT, 3); 
     curl_exec($ch);
     curl_close($ch);
 }
-
 // دالة مساعدة لتوليد المسار السري للطلبات
 function get_firebase_secret_path($user_id, $username) {
     return md5($user_id . 'SUPER_SECRET_KEY_123' . $username);
@@ -2367,13 +2367,18 @@ $c_item['merchant_id'] = $m_id;
                     }
 
                     // دفع الطلب إلى Firebase ليظهر في لوحة التاجر الحية
-                    $merchant_secret_hash = md5($m_id . APP_SECRET_KEY . 'orders');
-                    $fb_order_data = $tick['ticket_data'];
-                    $fb_order_data['id'] = $tick['ticket_id'];
-                    $fb_order_data['status'] = $tick['status'];
-                    $fb_order_data['created_at'] = date('Y-m-d H:i:s');
-                    
-                    sync_to_firebase($m_username, "secure_active_orders/$merchant_secret_hash", $tick['ticket_id'], $fb_order_data, 'PUT');
+                  // --- دفع الطلب إلى Firebase بأمان تام ---
+try {
+    $merchant_secret_hash = md5($m_id . APP_SECRET_KEY . 'orders');
+    $fb_order_data = $tick['ticket_data'];
+    $fb_order_data['id'] = $tick['ticket_id'];
+    $fb_order_data['status'] = $tick['status'];
+    $fb_order_data['created_at'] = date('Y-m-d H:i:s');
+
+    sync_to_firebase($m_username, "secure_active_orders/$merchant_secret_hash", $tick['ticket_id'], $fb_order_data, 'PUT');
+} catch (Exception $fb_err) {
+    // تجاهل أي خطأ هنا لكي لا يتوقف الطلب
+}
                     
                     // 8. إرسال الإشعارات (Push & SMS)
                     $stmt_m_info = $pdo->prepare("SELECT phone, store_name, settings FROM users WHERE id = ?");
