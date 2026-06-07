@@ -2309,13 +2309,21 @@ $c_item['merchant_id'] = $m_id;
        // ========================================================
             // 7. خصم المخزون من D1 وإرسال الطلبات لـ Firebase (Post-Processing)
             // ========================================================
-            try {
-                foreach ($created_tickets as $tick) {
-                    $m_username = $tick['merchant_username'];
-                    $m_id = $tick['merchant_id'];
-                    $fb_products_update = kv_request("stores/$m_username/products") ?: []; // لعمل تزامن للـ KV/Firebase لاحقاً
+            foreach ($created_tickets as $tick) {
+                $m_username = $tick['merchant_username'];
+                $m_id = $tick['merchant_id'];
+                
+                // [أ] تحديث المخزون (تم عزله في كتلة مستقلة لتلافي تعطيل المزامنة)
+                try {
+                    $fb_products_update = [];
+                    try {
+                        // جلب كاش المنتجات الحالي من Cloudflare
+                        $fb_products_update = kv_request("stores/$m_username/products") ?: []; 
+                    } catch (Exception $kv_err) {
+                        // نتجاوز الخطأ بصمت (مثلاً لو كان المتجر جديداً والكاش غير متوفر 404)
+                        error_log("Ignored KV Fetch error: " . $kv_err->getMessage());
+                    }
                     
-                    // ⭐ التعديل الجديد: متغير للتحكم، لا نحدث جيت هاب إلا إذا نفدت كمية منتج
                     $needs_github_sync = false; 
 
                     foreach ($tick['original_items_to_deduct'] as $item) {
@@ -2337,7 +2345,7 @@ $c_item['merchant_id'] = $m_id;
                                 
                                 $opts_json = json_encode($options_array, JSON_UNESCAPED_UNICODE);
                                 
-                                // تحديث D1 للخيارات (هذا يحدث دائماً في قاعدة البيانات لضمان دقة المخزون)
+                                // تحديث D1 للخيارات
                                 d1_request("UPDATE products SET quantity = ?, options = ?, updated_at = ? WHERE id = ? AND merchant_id = ?",
                                     [$total_remaining_qty, $opts_json, time(), $pid, $m_id]);
                                     
@@ -2346,7 +2354,6 @@ $c_item['merchant_id'] = $m_id;
                                     $fb_products_update[$pid]['quantity'] = $total_remaining_qty;
                                     $fb_products_update[$pid]['options'] = $options_array;
 
-                                    // ⭐ إذا نفدت الكمية تماماً، نحذف المنتج من العرض ونفعل التحديث
                                     if ($total_remaining_qty <= 0) {
                                         unset($fb_products_update[$pid]);
                                         $needs_github_sync = true;
@@ -2361,7 +2368,6 @@ $c_item['merchant_id'] = $m_id;
                                     $new_qty = max(0, $item['current_db_qty'] - $item['quantity']);
                                     $fb_products_update[$pid]['quantity'] = $new_qty;
 
-                                    // ⭐ إذا نفدت الكمية تماماً، نحذف المنتج من العرض ونفعل التحديث
                                     if ($new_qty <= 0) {
                                         unset($fb_products_update[$pid]);
                                         $needs_github_sync = true;
@@ -2371,27 +2377,36 @@ $c_item['merchant_id'] = $m_id;
                         }
                     }
 
-                    // ⭐ التحديث الذكي: لن يتم رفع أي شيء لـ GitHub إلا إذا نفدت كمية منتج وتم حذفه
+                    // مزامنة الكاش لـ GitHub في حال نفاد المخزون
                     if ($needs_github_sync) {
-                        kv_request("stores/$m_username/products", 'PUT', $fb_products_update);
-                        build_and_sync_split_json($m_username, $fb_products_update);
+                        try {
+                            kv_request("stores/$m_username/products", 'PUT', $fb_products_update);
+                            if (function_exists('build_and_sync_split_json')) {
+                                build_and_sync_split_json($m_username, $fb_products_update);
+                            }
+                        } catch (Exception $sync_err) {
+                            error_log("GitHub cache sync failed: " . $sync_err->getMessage());
+                        }
                     }
+                } catch (Exception $inventory_err) {
+                    error_log("Inventory update failed: " . $inventory_err->getMessage());
+                }
 
-                    // دفع الطلب إلى Firebase ليظهر في لوحة التاجر الحية
-                  // --- دفع الطلب إلى Firebase بأمان تام ---
-try {
-    $merchant_secret_hash = md5($m_id . APP_SECRET_KEY . 'orders');
-    $fb_order_data = $tick['ticket_data'];
-    $fb_order_data['id'] = $tick['ticket_id'];
-    $fb_order_data['status'] = $tick['status'];
-    $fb_order_data['created_at'] = date('Y-m-d H:i:s');
+                // [ب] دفع الطلب إلى Firebase (بشكل مستقل لضمان وصوله مهما حدث في معالجة المخزون)
+                try {
+                    $merchant_secret_hash = md5($m_id . APP_SECRET_KEY . 'orders');
+                    $fb_order_data = $tick['ticket_data'];
+                    $fb_order_data['id'] = $tick['ticket_id'];
+                    $fb_order_data['status'] = $tick['status'];
+                    $fb_order_data['created_at'] = date('Y-m-d H:i:s');
 
-    sync_to_firebase($m_username, "secure_active_orders/$merchant_secret_hash", $tick['ticket_id'], $fb_order_data, 'PUT');
-} catch (Exception $fb_err) {
-    // تجاهل أي خطأ هنا لكي لا يتوقف الطلب
-}
-                    
-                    // 8. إرسال الإشعارات (Push & SMS)
+                    sync_to_firebase($m_username, "secure_active_orders/$merchant_secret_hash", $tick['ticket_id'], $fb_order_data, 'PUT');
+                } catch (Exception $fb_err) {
+                    error_log("Firebase order sync failed: " . $fb_err->getMessage());
+                }
+                
+                // [ج] إرسال الإشعارات الفورية
+                try {
                     $stmt_m_info = $pdo->prepare("SELECT phone, store_name, settings FROM users WHERE id = ?");
                     $stmt_m_info->execute([$m_id]);
                     $m_info_db = $stmt_m_info->fetch(PDO::FETCH_ASSOC);
@@ -2418,10 +2433,9 @@ try {
                             }
                         }
                     }
+                } catch (Exception $notif_err) {
+                    error_log("Notification dispatch failed: " . $notif_err->getMessage());
                 }
-            } catch (Exception $sync_error) {
-                // الأخطاء هنا لا توقف العملية لأن الطلب تم حفظه في قاعدة البيانات (TiDB)
-                error_log("D1/Firebase post-order sync failed: " . $sync_error->getMessage());
             }
 
             // 9. الاستجابة النهائية للزبون
