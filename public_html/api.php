@@ -714,13 +714,8 @@ function sync_merchant_info_json($pdo, $user_id, $merchant_username) {
         'settings'   => $settings 
     ];
 
-    // 1. رفع ملف info إلى Cloudflare KV (الإضافة الجديدة ⭐)
-    try {
-        kv_request("stores/$merchant_username/info", 'PUT', $info_data);
-    } catch (Exception $e) {
-        // نتجاوز الخطأ بصمت حتى لا يتوقف الرفع إلى GitHub إذا تعطل الـ KV
-        error_log("KV Sync Error for Info: " . $e->getMessage());
-    }
+    // ⭐ تم إزالة try/catch لإجبار النظام على إظهار الخطأ لك إذا فشل KV
+    kv_request("stores/$merchant_username/info", 'PUT', $info_data);
 
     // 2. رفع ملف info.json إلى GitHub
     sync_to_github("stores/$merchant_username/info.json", $info_data, 'PUT', "Update store info v$timestamp");
@@ -744,13 +739,8 @@ function sync_merchant_info_json($pdo, $user_id, $merchant_username) {
     if (!isset($current_manifest['files'])) $current_manifest['files'] = [];
     $current_manifest['files']['info'] = $timestamp;
 
-    // رفع المانيفست الجديد إلى GitHub
     sync_to_github("stores/$merchant_username/manifest.json", $current_manifest, 'PUT', "Update manifest with info v$timestamp");
-    
-    // رفع المانيفست الجديد إلى Cloudflare KV (لضمان التزامن التام ⭐)
-    try {
-        kv_request("stores/$merchant_username/manifest", 'PUT', $current_manifest);
-    } catch (Exception $e) {}
+    kv_request("stores/$merchant_username/manifest", 'PUT', $current_manifest);
 }
 function reassign_stale_orders($pdo) {
     try {
