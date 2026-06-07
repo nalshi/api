@@ -174,10 +174,7 @@ function sync_to_firebase($merchant_username, $node, $item_id, $data, $method = 
     $fb_url = rtrim(getenv('FIREBASE_DB_URL') ?: $_ENV['FIREBASE_DB_URL'] ?: 'https://shiban-a2757-default-rtdb.europe-west1.firebasedatabase.app', '/');
     $fb_secret = getenv('FIREBASE_DB_SECRET') ?: $_ENV['FIREBASE_DB_SECRET'] ?: '';
 
-    if (empty($fb_secret)) {
-        error_log("Firebase Error: Secret is empty");
-        return;
-    }
+    if (empty($fb_secret)) return;
 
     $safe_username = preg_replace('/[^a-zA-Z0-9_]/', '_', $merchant_username);
     $path = $item_id ? "/$node/$item_id.json" : "/$node.json";
@@ -190,7 +187,7 @@ function sync_to_firebase($merchant_username, $node, $item_id, $data, $method = 
     if ($method !== 'DELETE') {
         $json_data = json_encode($data, JSON_UNESCAPED_UNICODE);
         curl_setopt($ch, CURLOPT_POSTFIELDS, $json_data);
-        // 🚀 التعديل: إزالة Content-Length لأن cURL يحسبه تلقائياً وبشكل أدق
+        // هنا تم إزالة حساب الطول، نكتفي بتحديد نوع المحتوى فقط
         curl_setopt($ch, CURLOPT_HTTPHEADER, [
             'Content-Type: application/json'
         ]);
@@ -199,13 +196,8 @@ function sync_to_firebase($merchant_username, $node, $item_id, $data, $method = 
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
     curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
     curl_setopt($ch, CURLOPT_TIMEOUT, 5);
-    $response = curl_exec($ch);
-    $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_exec($ch);
     curl_close($ch);
-
-    if ($http_code >= 400) {
-        error_log("FIREBASE WRITE FAILED: URL=$url | HTTP_CODE=$http_code | RESPONSE=$response");
-    }
 }
 // دالة مساعدة لتوليد المسار السري للطلبات
 function get_firebase_secret_path($user_id, $username) {
