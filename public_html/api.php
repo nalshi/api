@@ -4142,8 +4142,7 @@ try {
             if ($stmt->rowCount() > 0) {
                 $get_order = $pdo->prepare("SELECT ticket_data, status FROM live_tickets WHERE ticket_id = ?");
                 $get_order->execute([$order_id]);
-                $o_data = $get_order->fetch(PDO::
-$o_data = $get_order->fetch(PDO::FETCH_ASSOC);
+                $o_data = $get_order->fetch(PDO::FETCH_ASSOC);
                 $fb_data = json_decode($o_data['ticket_data'], true);
                 $fb_data['id'] = $order_id;
                 $fb_data['status'] = $o_data['status'];
