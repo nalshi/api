@@ -514,7 +514,7 @@ function trigger_cache_rebuild($merchant_id, $merchant_username) {
 
     try {
         // 1. جلب كافة المنتجات النشطة والمقبولة لهذا التاجر من TiDB Cloud
-        $stmt = $pdo->prepare("SELECT * FROM products WHERE merchant_id = ? AND is_available = 1 AND approval_status = 'approved'");
+$stmt = $pdo->prepare("SELECT * FROM products WHERE merchant_id = ? AND is_available = 1 AND (approval_status = 'approved' OR approval_status IS NULL OR approval_status = '')");
         $stmt->execute([$merchant_id]);
         $products = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
@@ -3655,12 +3655,13 @@ try {
                 throw new Exception('سعر البيع يجب أن يكون أعلى من التكلفة.');
             }
 
-            // 5. الحفظ المباشر والآمن في قاعدة بيانات TiDB Cloud (PDO)
+    // 5. الحفظ المباشر والآمن في قاعدة بيانات TiDB Cloud (PDO)
             if ($is_edit) {
+                // استبدل استعلام الـ UPDATE القديم بهذا:
                 $sql = "UPDATE products SET 
                         name = ?, description = ?, price = ?, cost_price = ?, discount = ?, 
                         image = ?, type = ?, options = ?, quantity = ?, quantity_type = ?, 
-                        is_available = ?, currency = ?, updated_at = ?
+                        is_available = ?, currency = ?, updated_at = ?, approval_status = 'approved'
                         WHERE id = ? AND merchant_id = ?";
                 $params = [
                     $name, $desc, $sell_price, $cost_price, $discount_percent, 
@@ -3670,14 +3671,15 @@ try {
                 $stmt_save = $pdo->prepare($sql);
                 $stmt_save->execute($params);
             } else {
-                $sql = "INSERT INTO products 
-                        (id, merchant_id, name, description, price, cost_price, discount, image, type, options, quantity, quantity_type, is_available, currency, updated_at) 
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
-                $params = [
-                    $pid, $user_id, $name, $desc, $sell_price, $cost_price, $discount_percent, 
-                    $img, $category_name, $options, $quantity, $quantity_type, 
-                    $is_available, $currency, time()
-                ];
+                // استبدل استعلام الـ INSERT القديم بهذا:
+$sql = "INSERT INTO products 
+        (id, merchant_id, name, description, price, cost_price, discount, image, type, options, quantity, quantity_type, is_available, currency, updated_at, approval_status) 
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'approved')";
+$params = [
+    $pid, $user_id, $name, $desc, $sell_price, $cost_price, $discount_percent, 
+    $img, $category_name, $options, $quantity, $quantity_type, 
+    $is_available, $currency, time()
+];
                 $stmt_save = $pdo->prepare($sql);
                 $stmt_save->execute($params);
             }
