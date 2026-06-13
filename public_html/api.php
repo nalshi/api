@@ -509,36 +509,131 @@ function sanitize_input($data) {
     return htmlspecialchars($data, ENT_QUOTES, 'UTF-8');
 }
 function trigger_cache_rebuild($merchant_id, $merchant_username) {
-    // جلب رابط الـ Worker السري
-    $worker_url = getenv('WORKER_D1_URL') ?: $_SERVER['WORKER_D1_URL'] ?? '';
-    $worker_secret = getenv('WORKER_SECRET') ?: $_SERVER['WORKER_SECRET'] ?? '';
-    
-    if (empty($worker_url) || empty($worker_secret)) return;
+    global $pdo;
+    if (!$pdo) return false;
 
-    // استخراج الدومين الأساسي للـ Worker
-    $parsed = parse_url($worker_url);
-    $base_worker_url = $parsed['scheme'] . '://' . $parsed['host'];
-    
-    // إرسال طلب خلفي للـ Worker ليقوم بجلب البيانات من D1 وبناء ملفات KV
-    $ch = curl_init($base_worker_url . "/api/rebuild-cache");
-    curl_setopt($ch, CURLOPT_CUSTOMREQUEST, 'POST');
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_TIMEOUT, 3); // 3 ثوانٍ للمزامنة السريعة
-    
-    $payload = json_encode([
-        'merchant_id' => $merchant_id,
-        'merchant_username' => $merchant_username
-    ]);
-    
-    curl_setopt($ch, CURLOPT_POSTFIELDS, $payload);
-    curl_setopt($ch, CURLOPT_HTTPHEADER, [
-        'Content-Type: application/json',
-        'Authorization: Bearer ' . $worker_secret
-    ]);
-    curl_exec($ch);
-    curl_close($ch);
+    try {
+        // 1. جلب كافة المنتجات النشطة والمقبولة لهذا التاجر من TiDB Cloud
+        $stmt = $pdo->prepare("SELECT * FROM products WHERE merchant_id = ? AND is_available = 1 AND approval_status = 'approved'");
+        $stmt->execute([$merchant_id]);
+        $products = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+        $timestamp = round(microtime(true) * 1000);
+        
+        // 2. إعداد كشاف البحث السريع (Search Index)
+        $searchIndex = [
+            '_version' => $timestamp,
+            'data' => []
+        ];
+        $categoriesSet = [];
+        $pages = [];
+        $PAGE_SIZE = 20;
+
+        foreach ($products as $p) {
+            $searchIndex['data'][] = [
+                'id' => $p['id'],
+                'n' => $p['name'],
+                'p' => (float)$p['price'],
+                'd' => (float)($p['discount'] ?? 0),
+                'i' => $p['image'] ?? '',
+                't' => $p['type'] ?? 'عام',
+                'a' => (int)($p['is_available'] ?? 1)
+            ];
+            
+            $cat = $p['type'] ?? 'عام';
+            if (!in_array($cat, $categoriesSet)) {
+                $categoriesSet[] = $cat;
+            }
+        }
+
+        // 3. تقسيم المنتجات إلى صفحات مجزأة (Pagination)
+        $chunks = array_chunk($products, $PAGE_SIZE);
+        foreach ($chunks as $index => $chunk) {
+            $pageNum = $index + 1;
+            $pageData = [];
+            foreach ($chunk as $p) {
+                $opts = [];
+                if (!empty($p['options'])) {
+                    $opts = json_decode($p['options'], true) ?: [];
+                }
+                $pageData[] = [
+                    'id' => $p['id'],
+                    'name' => $p['name'],
+                    'mainDescription' => $p['description'] ?? $p['mainDescription'] ?? '',
+                    'price' => (float)$p['price'],
+                    'discount' => (float)($p['discount'] ?? 0),
+                    'image' => $p['image'] ?? '',
+                    'type' => $p['type'] ?? 'عام',
+                    'options' => $opts,
+                    'quantity' => (int)($p['quantity'] ?? 0),
+                    'quantity_type' => $p['quantity_type'] ?? 'tracked',
+                    'is_available' => (int)($p['is_available'] ?? 1)
+                ];
+            }
+            $pages[$pageNum] = $pageData;
+        }
+
+        if (empty($pages)) {
+            $pages[1] = [];
+        }
+
+        $categoriesData = [
+            '_version' => $timestamp,
+            'data' => $categoriesSet
+        ];
+
+        $basePath = "stores/{$merchant_username}/";
+        $manifestVersions = [
+            'search' => $timestamp,
+            'categories' => $timestamp,
+            'info' => $timestamp,
+            'pages' => []
+        ];
+
+        // 4. رفع الملفات المركبة مباشرة إلى Cloudflare KV
+        kv_request("{$basePath}search_index", 'PUT', $searchIndex);
+        kv_request("{$basePath}categories", 'PUT', $categoriesData);
+
+        foreach ($pages as $pageNum => $pageData) {
+            $pagePayload = [
+                '_version' => $timestamp,
+                'page' => $pageNum,
+                'total_pages' => count($pages),
+                'data' => $pageData
+            ];
+            kv_request("{$basePath}products_page_{$pageNum}", 'PUT', $pagePayload);
+            $manifestVersions['pages']["page_{$pageNum}"] = $timestamp;
+        }
+
+        // رفع ملف المانيفست (Manifest) النهائي لـ KV
+        $manifestPayload = [
+            'version' => $timestamp,
+            'total_products' => count($products),
+            'total_pages' => count($pages),
+            'files' => $manifestVersions
+        ];
+        kv_request("{$basePath}manifest", 'PUT', $manifestPayload);
+
+        // 5. مزامنة الملفات مع مستودع GitHub الاحتياطي لمطابقة البيانات
+        sync_to_github("{$basePath}manifest.json", $manifestPayload, 'PUT', "Rebuild cache manifest v$timestamp");
+        sync_to_github("{$basePath}search_index.json", $searchIndex, 'PUT', "Rebuild search index v$timestamp");
+        sync_to_github("{$basePath}categories.json", $categoriesData, 'PUT', "Rebuild categories v$timestamp");
+        foreach ($pages as $pageNum => $pageData) {
+            $pagePayload = [
+                '_version' => $timestamp,
+                'page' => $pageNum,
+                'total_pages' => count($pages),
+                'data' => $pageData
+            ];
+            sync_to_github("{$basePath}products_page_{$pageNum}.json", $pagePayload, 'PUT', "Rebuild page $pageNum v$timestamp");
+        }
+
+        return true;
+    } catch (Exception $e) {
+        error_log("Failed to rebuild cache for merchant $merchant_id: " . $e->getMessage());
+        return false;
+    }
 }
-
 function escape_like_search($search) {
     return str_replace(['\\', '%', '_'],['\\\\', '\%', '\_'], $search);
 }
