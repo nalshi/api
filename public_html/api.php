@@ -2078,13 +2078,13 @@ try {
                 }
 
                 // 2. الدعم العكسي للمنتجات التي ما زالت في نظام listings القديم
-                $pdo_sql = "
-                    SELECT p.id as global_product_id, p.name, p.image, p.sizes as options, p.discount, p.cost_price, 
-                           l.id as listing_id, l.merchant_price as price, l.quantity, l.quantity_type, l.currency, l.is_available 
-                    FROM merchant_listings l 
-                    JOIN products p ON l.global_product_id = p.id 
-                    WHERE l.merchant_id = ? AND (l.id IN ($placeholders) OR p.id IN ($placeholders))
-                ";
+               $pdo_sql = "
+    SELECT p.id as global_product_id, p.name, p.image, p.options, p.discount, p.cost_price, 
+           l.id as listing_id, l.merchant_price as price, l.quantity, l.quantity_type, l.currency, l.is_available 
+    FROM merchant_listings l 
+    JOIN products p ON l.global_product_id = p.id 
+    WHERE l.merchant_id = ? AND (l.id IN ($placeholders) OR p.id IN ($placeholders))
+";
                 $stmt_pdo = $pdo->prepare($pdo_sql);
                 $params_pdo = array_merge([$merchant_id], $product_ids, $product_ids);
                 $stmt_pdo->execute($params_pdo);
