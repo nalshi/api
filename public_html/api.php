@@ -925,7 +925,8 @@ try {
         'auth_request_otp', 'auth_verify_otp', 'check_customer_session', 
         'login', 'check_phone', 'register_init', 'register_verify',
         'select_role', 'verify_new_device_otp', 'resend_device_otp',
-        'recover_init', 'recover_check_otp', 'recover_set_password', 'build_cache_cron'
+        'recover_init', 'recover_check_otp', 'recover_set_password', 'build_cache_cron',
+                    'macrodroid_webhook'
     ];
 
     $auth_header = $_SERVER['HTTP_AUTHORIZATION'] ?? $_SERVER['Authorization'] ?? '';
