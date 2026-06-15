@@ -157,28 +157,32 @@ function get_store_name_by_id($pdo, $user_id) {
     $stmt->execute([$user_id]);
     return $stmt->fetchColumn() ?: '';
 }
+// دالة فحص اشتراك التاجر
 function get_merchant_subscription_status($pdo, $merchant_id) {
-    // جلب بيانات التاجر
+    try {
+        // التأكد من وجود الأعمدة والجدول (إنشاء تلقائي لتجنب الأخطاء)
+        $pdo->exec("ALTER TABLE users ADD COLUMN subscription_expiry DATETIME NULL");
+    } catch(Exception $e) {}
+    try {
+        $pdo->exec("CREATE TABLE IF NOT EXISTS merchant_payments (
+            id INT AUTO_INCREMENT PRIMARY KEY, merchant_id INT NOT NULL, transaction_id VARCHAR(50) NOT NULL UNIQUE, amount DECIMAL(10,2) NOT NULL DEFAULT 3000.00, status ENUM('pending', 'verified', 'rejected') DEFAULT 'pending', created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        ) ENGINE=InnoDB;");
+    } catch(Exception $e) {}
+
     $stmt = $pdo->prepare("SELECT subscription_expiry FROM users WHERE id = ?");
     $stmt->execute([$merchant_id]);
     $expiry = $stmt->fetchColumn();
 
-    // حساب عدد الطلبات الإجمالية التي استلمها التاجر (في الأرشيف والنشطة)
-    $stmt_orders = $pdo->prepare("
-        SELECT 
-            (SELECT COUNT(*) FROM live_tickets WHERE merchant_id = ?) + 
-            (SELECT COUNT(*) FROM orders_archive WHERE merchant_id = ?)
-    ");
+    $stmt_orders = $pdo->prepare("SELECT (SELECT COUNT(*) FROM live_tickets WHERE merchant_id = ?) + (SELECT COUNT(*) FROM orders_archive WHERE merchant_id = ?)");
     $stmt_orders->execute([$merchant_id, $merchant_id]);
     $total_orders = (int)$stmt_orders->fetchColumn();
 
     $is_expired = ($expiry && strtotime($expiry) < time());
     $needs_subscription = false;
 
-    // إذا لم يدفع أبداً وتجاوز 20 طلب، أو انتهى اشتراكه السابق
     if (!$expiry && $total_orders >= 20) {
         $needs_subscription = true;
-    } elseif ($is_expired) {
+    } elseif ($expiry && $is_expired) {
         $needs_subscription = true;
     }
 
@@ -3687,16 +3691,15 @@ try {
             send_response('success',['number' => $num]);
             break;
 
-        case 'save_product':
-$sub_status = get_merchant_subscription_status($pdo, $user_id);
-if ($sub_status['is_locked']) {
-    throw new Exception("تجاوزت الحد المجاني أو انتهى اشتراكك. يرجى تجديد الاشتراك بـ 3000 ريال لتتمكن من إضافة المنتجات أو الموافقة على الطلبات.");
-}        
+        case 'save_product':     
             // 1. التحقق من الصلاحيات
             if (!$user_id || $user_role !== 'merchant') {
                 send_response('error', ['message' => 'غير مصرح لك بإضافة أو تعديل المنتجات.'], 401);
             }
-            
+$sub_status = get_merchant_subscription_status($pdo, $user_id);
+            if ($sub_status['is_locked']) {
+                throw new Exception("تجاوزت الحد المجاني. يرجى دفع الاشتراك 3000 ريال لتتمكن من إضافة المنتجات.");
+            }            
             // 2. تنظيف المدخلات
             $pid = !empty($_POST['id']) ? sanitize_input($_POST['id']) : 'prod_' . generate_uuid();
             $is_edit = !empty($_POST['id']);
@@ -4337,11 +4340,12 @@ $params = [
             break;
 
         case 'merchant_approve_order':
- $sub_status = get_merchant_subscription_status($pdo, $user_id);
-if ($sub_status['is_locked']) {
-    throw new Exception("تجاوزت الحد المجاني أو انتهى اشتراكك. يرجى تجديد الاشتراك بـ 3000 ريال لتتمكن من إضافة المنتجات أو الموافقة على الطلبات.");
 }       
             if ($user_role !== 'merchant') throw new Exception("غير مصرح لك.");
+ $sub_status = get_merchant_subscription_status($pdo, $user_id);
+            if ($sub_status['is_locked']) {
+                throw new Exception("حسابك مقفل بسبب انتهاء الحد المجاني. لا يمكنك معالجة الطلبات حتى تجديد الاشتراك.");
+            }           
             $order_id = sanitize_input($input['order_id']);
             
             $sql = "UPDATE live_tickets SET status = 'confirmed_by_store' WHERE ticket_id = ? AND merchant_id = ?";
@@ -4772,20 +4776,20 @@ if ($sub_status['is_locked']) {
             if (!$user_id || !in_array($user_role, ['merchant', 'delivery'])) {
                 send_response('error', ['message' => 'غير مصرح لك بالوصول'], 401);
             }
-            
             $stmt = $pdo->prepare("SELECT id, username, store_name, phone, store_type, settings FROM users WHERE id = ?");
             $stmt->execute([$user_id]);
             $merchantData = $stmt->fetch(PDO::FETCH_ASSOC);
-            $sub_status = get_merchant_subscription_status($pdo, $user_id); // أضف هذا السطر
+            
             if ($merchantData) {
                 $merchantData['settings'] = json_decode($merchantData['settings'] ?: '{}', true);
-                $merchantData['subscription'] = $sub_status; // أضف هذا السطر
+                if ($user_role === 'merchant') {
+                    $merchantData['subscription'] = get_merchant_subscription_status($pdo, $user_id);
+                }
                 send_response('success', ['data' => $merchantData]);
             } else {
                 throw new Exception("لم يتم العثور على بيانات الحساب.");
             }
-            break;    
-
+            break;
         case 'merchant_cancel_order':
             if ($user_role !== 'merchant') throw new Exception("غير مصرح لك.");
             $order_id = sanitize_input($input['order_id']);
