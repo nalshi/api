@@ -4340,7 +4340,7 @@ $params = [
             break;
 
         case 'merchant_approve_order':
-}       
+  
             if ($user_role !== 'merchant') throw new Exception("غير مصرح لك.");
  $sub_status = get_merchant_subscription_status($pdo, $user_id);
             if ($sub_status['is_locked']) {
