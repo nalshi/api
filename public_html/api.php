@@ -157,10 +157,16 @@ function get_store_name_by_id($pdo, $user_id) {
     $stmt->execute([$user_id]);
     return $stmt->fetchColumn() ?: '';
 }
+// دالة فحص اشتراك التاجر (النسخة الآمنة والمضادة للانهيار)
 function get_merchant_subscription_status($pdo, $merchant_id) {
+    $expiry = null;
+    $total_orders = 0;
+
+    // 1. محاولة تهيئة قاعدة البيانات بصمت (تجاهل الخطأ إن فشل)
     try {
         $pdo->exec("ALTER TABLE users ADD COLUMN subscription_expiry DATETIME NULL");
-    } catch(Exception $e) {}
+    } catch(PDOException $e) { /* تجاهل */ }
+
     try {
         $pdo->exec("CREATE TABLE IF NOT EXISTS merchant_payments (
             id INT AUTO_INCREMENT PRIMARY KEY, 
@@ -171,27 +177,44 @@ function get_merchant_subscription_status($pdo, $merchant_id) {
             plan_name VARCHAR(100) NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         ) ENGINE=InnoDB;");
-    } catch(Exception $e) {}
+    } catch(PDOException $e) { /* تجاهل */ }
 
-    $stmt = $pdo->prepare("SELECT subscription_expiry FROM users WHERE id = ?");
-    $stmt->execute([$merchant_id]);
-    $expiry = $stmt->fetchColumn();
-
-    $total_orders = 0;
-    // إضافة الحماية هنا (try/catch) لمنع توقف الـ API إذا كانت جداول الطلبات غير موجودة بعد
+    // 2. جلب تاريخ الانتهاء بأمان (إذا لم يكن العمود موجوداً، لا تنهار)
     try {
-        $stmt_orders = $pdo->prepare("SELECT (SELECT COUNT(*) FROM live_tickets WHERE merchant_id = ?) + (SELECT COUNT(*) FROM orders_archive WHERE merchant_id = ?)");
-        $stmt_orders->execute([$merchant_id, $merchant_id]);
-        $total_orders = (int)$stmt_orders->fetchColumn();
-    } catch (Exception $e) {
-        // في حال عدم وجود الجداول، نعتبر عدد الطلبات صفر
+        $stmt = $pdo->prepare("SELECT subscription_expiry FROM users WHERE id = ?");
+        $stmt->execute([$merchant_id]);
+        $expiry = $stmt->fetchColumn();
+    } catch(PDOException $e) {
+        $expiry = null;
+    }
+
+    // 3. جلب عدد الطلبات بأمان شديد (فصل الاستعلامات لمنع الانهيار إذا كان أحد الجداول مفقوداً)
+    try {
+        $live_count = 0;
+        $archive_count = 0;
+
+        try {
+            $stmt_live = $pdo->prepare("SELECT COUNT(*) FROM live_tickets WHERE merchant_id = ?");
+            $stmt_live->execute([$merchant_id]);
+            $live_count = (int)$stmt_live->fetchColumn();
+        } catch(PDOException $e) {}
+
+        try {
+            $stmt_arc = $pdo->prepare("SELECT COUNT(*) FROM orders_archive WHERE merchant_id = ?");
+            $stmt_arc->execute([$merchant_id]);
+            $archive_count = (int)$stmt_arc->fetchColumn();
+        } catch(PDOException $e) {}
+
+        $total_orders = $live_count + $archive_count;
+    } catch(Exception $e) {
         $total_orders = 0;
     }
 
+    // 4. الحسابات المنطقية
     $is_expired = ($expiry && strtotime($expiry) < time());
     $needs_subscription = false;
     
-    // التاجر الجديد له 20 طلب مجاني لتجربة النظام (Hook)
+    // التاجر الجديد له 20 طلب مجاني لتجربة النظام
     $free_limit = 20;
 
     if (!$expiry && $total_orders >= $free_limit) {
