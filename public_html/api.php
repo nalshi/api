@@ -55,7 +55,7 @@ header("Cache-Control: no-store, no-cache, must-revalidate, max-age=0");
 
 // 1. الجدار الناري الصارم: تحديد النطاقات المسموحة فقط
 $allowed_origins = [
-    'https://n.ny.work.gd',
+    'https://nalsh.vercel.app',
 ];
 
 $request_origin = $_SERVER['HTTP_ORIGIN'] ?? '';
@@ -158,14 +158,20 @@ function get_store_name_by_id($pdo, $user_id) {
     return $stmt->fetchColumn() ?: '';
 }
 // دالة فحص اشتراك التاجر
+// دالة فحص اشتراك التاجر (النسخة الذكية)
 function get_merchant_subscription_status($pdo, $merchant_id) {
     try {
-        // التأكد من وجود الأعمدة والجدول (إنشاء تلقائي لتجنب الأخطاء)
         $pdo->exec("ALTER TABLE users ADD COLUMN subscription_expiry DATETIME NULL");
     } catch(Exception $e) {}
     try {
         $pdo->exec("CREATE TABLE IF NOT EXISTS merchant_payments (
-            id INT AUTO_INCREMENT PRIMARY KEY, merchant_id INT NOT NULL, transaction_id VARCHAR(50) NOT NULL UNIQUE, amount DECIMAL(10,2) NOT NULL DEFAULT 3000.00, status ENUM('pending', 'verified', 'rejected') DEFAULT 'pending', created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            id INT AUTO_INCREMENT PRIMARY KEY, 
+            merchant_id INT NOT NULL, 
+            transaction_id VARCHAR(50) NOT NULL UNIQUE, 
+            amount DECIMAL(10,2) NOT NULL DEFAULT 0.00, 
+            status ENUM('pending', 'verified', 'rejected', 'requires_admin') DEFAULT 'pending', 
+            plan_name VARCHAR(100) NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         ) ENGINE=InnoDB;");
     } catch(Exception $e) {}
 
@@ -179,8 +185,11 @@ function get_merchant_subscription_status($pdo, $merchant_id) {
 
     $is_expired = ($expiry && strtotime($expiry) < time());
     $needs_subscription = false;
+    
+    // التاجر الجديد له 20 طلب مجاني لتجربة النظام (Hook)
+    $free_limit = 20;
 
-    if (!$expiry && $total_orders >= 20) {
+    if (!$expiry && $total_orders >= $free_limit) {
         $needs_subscription = true;
     } elseif ($expiry && $is_expired) {
         $needs_subscription = true;
@@ -188,9 +197,10 @@ function get_merchant_subscription_status($pdo, $merchant_id) {
 
     return [
         'total_orders' => $total_orders,
-        'free_orders_left' => max(0, 20 - $total_orders),
+        'free_orders_left' => max(0, $free_limit - $total_orders),
         'is_locked' => $needs_subscription,
-        'expiry_date' => $expiry
+        'expiry_date' => $expiry,
+        'has_subscribed_before' => ($expiry !== null)
     ];
 }
 // =======================================================
@@ -1259,7 +1269,65 @@ try {
             }
             throw new Exception("لم يتم استلام أي صورة صالحة.");
             break;
+// --- باقات الاشتراك الذكية للتجار ---
+        case 'get_subscription_plans':
+            if ($user_role !== 'merchant') throw new Exception("للتجار فقط");
+            
+            $sub_status = get_merchant_subscription_status($pdo, $user_id);
+            
+            $plans = [
+                [
+                    'id' => 'monthly',
+                    'name' => 'الباقة الأساسية (شهر)',
+                    'price' => 3000,
+                    'old_price' => null,
+                    'days' => 30,
+                    'badge' => 'الأكثر طلباً',
+                    'features' => ['طلبات غير محدودة', 'إضافة منتجات لامحدودة', 'ظهور المتجر للعملاء']
+                ],
+                [
+                    'id' => 'quarterly',
+                    'name' => 'الباقة البرونزية (3 أشهر)',
+                    'price' => 6000,
+                    'old_price' => 9000,
+                    'days' => 90,
+                    'badge' => 'اشترك شهرين والثالث مجاناً!',
+                    'features' => ['جميع مميزات الأساسية', 'توفير 3000 ريال', 'راحة بال لربع سنة']
+                ],
+                [
+                    'id' => 'semi_annual',
+                    'name' => 'الباقة الفضية (6 أشهر)',
+                    'price' => 15000,
+                    'old_price' => 18000,
+                    'days' => 180,
+                    'badge' => 'خصم حصري',
+                    'features' => ['جميع المميزات', 'أولوية في الدعم الفني']
+                ],
+                [
+                    'id' => 'annual',
+                    'name' => 'الباقة الذهبية (سنة كاملة)',
+                    'price' => 30000,
+                    'old_price' => 36000,
+                    'days' => 365,
+                    'badge' => 'توفير شهرين مجاناً',
+                    'features' => ['جميع المميزات', 'متجر مميز (VIP)', 'حماية من تقلبات الأسعار']
+                ]
+            ];
 
+            // رسالة تسويقية ذكية تظهر حسب حالة التاجر
+            $marketing_message = "تخيل أن تفتح فرعاً لمحلك.. كم سيكلفك؟ منصتنا توفر لك فرعاً رقمياً بأقل من 100 ريال يومياً!";
+            if ($sub_status['has_subscribed_before'] && $sub_status['is_locked']) {
+                $marketing_message = "اشتقنا لك! عملاؤك يبحثون عن منتجاتك، جدد اشتراكك الآن لتعود مبيعاتك.";
+            } elseif (!$sub_status['has_subscribed_before'] && $sub_status['total_orders'] > 0) {
+                $marketing_message = "لقد حققت {$sub_status['total_orders']} طلبات مجاناً! أرباح طلب واحد تغطي قيمة الاشتراك. اشترك الآن للاستمرار.";
+            }
+
+            send_response('success', [
+                'status' => $sub_status,
+                'marketing_message' => $marketing_message,
+                'plans' => $plans
+            ]);
+            break;
         case 'save_fcm_token':
             if (!$user_id) send_response('error', ['message' => 'غير مصرح'], 401);
             $fcm_token = sanitize_input($input['fcm_token'] ?? '');
@@ -1356,79 +1424,129 @@ try {
             ]);
             break;
 // 1. التاجر يرسل رقم العملية من لوحة التحكم
+ // 1. التاجر يرسل رقم العملية (بدون أن نثق بالمبلغ الذي يحدده هو)
         case 'submit_subscription_payment':
             if ($user_role !== 'merchant') throw new Exception("للتجار فقط");
-            $trans_id = sanitize_input($input['transaction_id']);
-            if (empty($trans_id)) throw new Exception("يرجى إدخال رقم العملية");
+            $trans_id = sanitize_input($input['transaction_id'] ?? '');
+            if (empty($trans_id)) throw new Exception("يرجى إدخال رقم العملية (رقم الحوالة).");
 
-            // فحص هل الرقم مستخدم مسبقا
+            // فحص هل الرقم مستخدم مسبقا (منع تكرار استخدام نفس الحوالة)
             $check = $pdo->prepare("SELECT status FROM merchant_payments WHERE transaction_id = ?");
             $check->execute([$trans_id]);
             $existing = $check->fetchColumn();
 
-            if ($existing === 'verified') throw new Exception("رقم العملية هذا مستخدم ومفعل مسبقاً.");
-            if ($existing === 'pending') throw new Exception("هذا الرقم قيد المراجعة الآلية حالياً، يرجى الانتظار لحين تأكيده.");
+            if ($existing === 'verified') throw new Exception("رقم العملية هذا مستخدم ومفعل مسبقاً لحساب آخر.");
+            if ($existing === 'pending') throw new Exception("هذا الرقم قيد المراجعة الآلية حالياً، يرجى الانتظار ⏳.");
 
-            $pdo->prepare("INSERT INTO merchant_payments (merchant_id, transaction_id) VALUES (?, ?)")->execute([$user_id, $trans_id]);
+            // إدخال رقم العملية والمبلغ 0 (الـ Webhook هو من سيحدث المبلغ الحقيقي لاحقاً)
+            $pdo->prepare("INSERT INTO merchant_payments (merchant_id, transaction_id, amount) VALUES (?, ?, 0)")->execute([$user_id, $trans_id]);
             
-            // استجابة ذكية: النظام يبدأ بالاستماع (بانتظار رسالة الماكرو درويد)
-            send_response('success', ['message' => 'تم استلام رقم العملية. جاري التحقق الآلي عبر النظام (قد يستغرق من ثانية إلى دقيقتين).']);
+            send_response('success', ['message' => 'تم استلام رقم العملية. النظام يتحقق الآن مع البنك آلياً (قد يستغرق 1-3 دقائق).']);
             break;
 
         // 2. التحقق من حالة الدفع للواجهة (Polling)
         case 'check_payment_status':
+            if ($user_role !== 'merchant') throw new Exception("غير مصرح");
             $sub_status = get_merchant_subscription_status($pdo, $user_id);
             send_response('success', ['is_locked' => $sub_status['is_locked'], 'expiry' => $sub_status['expiry_date']]);
             break;
 
-        // 3. Webhook محمي مخصص لـ MacroDroid
+        // 3. Webhook الذكي والمحمي جداً (يعمل عبر MacroDroid)
         case 'webhook_verify_payment':
-            // حماية الويب هوك برقم سري قوي تضعه في الماكرو درويد
-            $secret = $input['secret_key'] ?? '';
-            if ($secret !== 'YOUR_SUPER_SECRET_MACRO_KEY_2026') {
-                send_response('error', ['message' => 'Access Denied'], 403);
+            
+            // 🛡️ الحماية 1: منع HTTP
+            $is_secure_connection = (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on') || 
+                                    (isset($_SERVER['HTTP_X_FORWARDED_PROTO']) && $_SERVER['HTTP_X_FORWARDED_PROTO'] === 'https');
+            if (!$is_secure_connection && strpos($_SERVER['HTTP_HOST'], 'localhost') === false) {
+                error_log("SECURITY ALERT: Insecure Webhook attempt");
+                send_response('error', ['message' => 'Access Denied: HTTPS required.'], 403);
             }
 
+            // 🛡️ الحماية 2: التوكن السري (مهم جداً ألا يعرفه أحد غيرك)
+            $expected_secure_token = getenv('PAYMENT_WEBHOOK_SECRET') ?: 'Nalsh_Secure_Pay_8899_XyZ_!@#_2026_MacroDroid_Sync_V11';
+            $provided_token = $_SERVER['HTTP_X_SECURE_PAYMENT_TOKEN'] ?? $input['secure_token'] ?? '';
+
+            if (empty($provided_token) || !hash_equals($expected_secure_token, $provided_token)) {
+                error_log("SECURITY ALERT: Invalid webhook token attempt");
+                send_response('error', ['message' => 'Access Denied: Invalid Token.'], 401);
+            }
+
+            // 💰 استخراج البيانات من رسالة البنك (SMS)
             $sms_body = $input['sms_text'] ?? '';
             
-            // استخراج رقم العملية والمبلغ من نص الرسالة (مثال لجوالي وفلوسك وأم فلوس)
-            // يفترض أن الماكرو يرسل النص الكامل لرسالة الـ SMS
+            // تعابير منتظمة لاستخراج رقم العملية والمبلغ (عدلها حسب صيغة رسائل بنكك إذا لزم الأمر)
             preg_match('/رقم العملية:?\s*([a-zA-Z0-9]+)/u', $sms_body, $trans_match);
             preg_match('/مبلغ:?\s*([0-9\.]+)/u', $sms_body, $amount_match);
             
             $trans_id = $trans_match[1] ?? $input['transaction_id'] ?? '';
-            $amount = $amount_match[1] ?? $input['amount'] ?? 0;
+            $actual_amount = (float)($amount_match[1] ?? $input['amount'] ?? 0);
 
-            if ($trans_id) {
-                // البحث عن رقم العملية في قاعدة البيانات (التي سجلها التاجر)
-                $stmt = $pdo->prepare("SELECT * FROM merchant_payments WHERE transaction_id = ? AND status = 'pending'");
-                $stmt->execute([$trans_id]);
-                $payment = $stmt->fetch(PDO::FETCH_ASSOC);
-
-                if ($payment) {
-                    $m_id = $payment['merchant_id'];
-                    
-                    try {
-                        $pdo->beginTransaction();
-                        // 1. تحديث حالة الدفعة
-                        $pdo->prepare("UPDATE merchant_payments SET status = 'verified', amount = ? WHERE id = ?")->execute([$amount, $payment['id']]);
-                        
-                        // 2. تجديد اشتراك التاجر شهر كامل (من تاريخ الدفع)
-                        $pdo->prepare("UPDATE users SET subscription_expiry = DATE_ADD(NOW(), INTERVAL 30 DAY) WHERE id = ?")->execute([$m_id]);
-                        $pdo->commit();
-                        
-                        send_response('success', ['message' => 'Verified successfully']);
-                    } catch (Exception $e) {
-                        $pdo->rollBack();
-                        send_response('error', ['message' => 'DB Error']);
-                    }
-                } else {
-                    // الدفعة وصلت للرقم قبل أن يسجلها التاجر في الموقع (نحفظها كعملية مسبقة)
-                    // (اختياري) يمكن إضافتها لحقل منفصل لتُفعل فور إدخال التاجر للرقم
-                }
+            if (empty($trans_id) || $actual_amount <= 0) {
+                 send_response('error', ['message' => 'Transaction ID or Amount missing.'], 400);
             }
-            send_response('success', ['message' => 'Logged']);
-            break;
+
+            // البحث عن المعاملة المعلقة للتاجر
+            $stmt = $pdo->prepare("SELECT * FROM merchant_payments WHERE transaction_id = ? AND status = 'pending' FOR UPDATE");
+            $stmt->execute([$trans_id]);
+            $payment = $stmt->fetch(PDO::FETCH_ASSOC);
+
+            if (!$payment) {
+                send_response('error', ['message' => 'Transaction not found or already processed.'], 404);
+            }
+
+            // 🧠 منطق الباقات الذكي (يعتمد على المبلغ الفعلي المستلم)
+            $days_to_add = 0;
+            $plan_name = 'غير معروف';
+
+            if ($actual_amount >= 30000) {
+                $days_to_add = 365;
+                $plan_name = 'سنوي (ذهبي)';
+            } elseif ($actual_amount >= 15000) {
+                $days_to_add = 180;
+                $plan_name = 'نصف سنوي (فضي)';
+            } elseif ($actual_amount >= 6000) {
+                $days_to_add = 90;
+                $plan_name = 'ربع سنوي (برونزي)';
+            } elseif ($actual_amount >= 3000) {
+                $days_to_add = 30;
+                $plan_name = 'شهري (أساسي)';
+            }
+
+            try {
+                $pdo->beginTransaction();
+                
+                $m_id = $payment['merchant_id'];
+
+                if ($days_to_add > 0) {
+                    // 1. تحديث حالة الدفعة بأنها ناجحة
+                    $pdo->prepare("UPDATE merchant_payments SET status = 'verified', amount = ?, plan_name = ? WHERE id = ?")
+                        ->execute([$actual_amount, $plan_name, $payment['id']]);
+                    
+                    // 2. تحديث التراكمي: إذا كان التاجر ما زال لديه أيام، أضف فوقها (لكي لا يخسر أيامه إذا جدد مبكراً)
+                    $update_sql = "UPDATE users SET subscription_expiry = CASE
+                                    WHEN subscription_expiry IS NOT NULL AND subscription_expiry > NOW()
+                                    THEN DATE_ADD(subscription_expiry, INTERVAL ? DAY)
+                                    ELSE DATE_ADD(NOW(), INTERVAL ? DAY)
+                                   END WHERE id = ?";
+                    $pdo->prepare($update_sql)->execute([$days_to_add, $days_to_add, $m_id]);
+                    
+                    $msg = "Payment verified. Plan: $plan_name. Added $days_to_add days.";
+                } else {
+                    // إذا حول مبلغ أقل من 3000 (مثلاً حول 1000 بالخطأ) يتم رفض التفعيل التلقائي ليراجعها المدير
+                    $pdo->prepare("UPDATE merchant_payments SET status = 'requires_admin', amount = ? WHERE id = ?")
+                        ->execute([$actual_amount, $payment['id']]);
+                    $msg = "Amount ($actual_amount) too low for auto-activation. Marked for admin review.";
+                }
+
+                $pdo->commit();
+                send_response('success', ['message' => $msg]);
+                
+            } catch (Exception $e) {
+                $pdo->rollBack();
+                error_log("Payment Error: " . $e->getMessage());
+                send_response('error', ['message' => 'DB Error'], 500);
+            }
+            break;       
         case 'get_initial_data':
             $stmt_settings = $pdo->query("SELECT setting_value FROM settings WHERE setting_key = 'store_settings'");
             $settings = json_decode($stmt_settings->fetchColumn() ?: '{}', true);
@@ -3698,8 +3816,11 @@ try {
             }
 $sub_status = get_merchant_subscription_status($pdo, $user_id);
             if ($sub_status['is_locked']) {
-                throw new Exception("تجاوزت الحد المجاني. يرجى دفع الاشتراك 3000 ريال لتتمكن من إضافة المنتجات.");
-            }            
+                $msg = $sub_status['has_subscribed_before'] 
+                    ? "انتهى اشتراكك الشهري! عملاؤك بانتظار منتجاتك الجديدة، اشترك الآن لتتمكن من إضافتها." 
+                    : "لقد تجاوزت الـ 20 طلب المجانية (بداية ممتازة!) 🎉. اشترك الآن بـ 3000 ريال فقط لتتمكن من إضافة المزيد من المنتجات.";
+                throw new Exception($msg);
+            }
             // 2. تنظيف المدخلات
             $pid = !empty($_POST['id']) ? sanitize_input($_POST['id']) : 'prod_' . generate_uuid();
             $is_edit = !empty($_POST['id']);
@@ -4340,12 +4461,12 @@ $params = [
             break;
 
         case 'merchant_approve_order':
-  
+    
             if ($user_role !== 'merchant') throw new Exception("غير مصرح لك.");
  $sub_status = get_merchant_subscription_status($pdo, $user_id);
             if ($sub_status['is_locked']) {
-                throw new Exception("حسابك مقفل بسبب انتهاء الحد المجاني. لا يمكنك معالجة الطلبات حتى تجديد الاشتراك.");
-            }           
+                throw new Exception("لديك طلبات جديدة بانتظارك! 💰 يرجى تجديد اشتراكك (ابتداءً من 3000 ريال) لتتمكن من قبول وتجهيز الطلبات، لا تدع الأرباح تفوتك.");
+            } 
             $order_id = sanitize_input($input['order_id']);
             
             $sql = "UPDATE live_tickets SET status = 'confirmed_by_store' WHERE ticket_id = ? AND merchant_id = ?";
