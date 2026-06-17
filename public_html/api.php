@@ -157,8 +157,6 @@ function get_store_name_by_id($pdo, $user_id) {
     $stmt->execute([$user_id]);
     return $stmt->fetchColumn() ?: '';
 }
-// دالة فحص اشتراك التاجر
-// دالة فحص اشتراك التاجر (النسخة الذكية)
 function get_merchant_subscription_status($pdo, $merchant_id) {
     try {
         $pdo->exec("ALTER TABLE users ADD COLUMN subscription_expiry DATETIME NULL");
@@ -179,9 +177,16 @@ function get_merchant_subscription_status($pdo, $merchant_id) {
     $stmt->execute([$merchant_id]);
     $expiry = $stmt->fetchColumn();
 
-    $stmt_orders = $pdo->prepare("SELECT (SELECT COUNT(*) FROM live_tickets WHERE merchant_id = ?) + (SELECT COUNT(*) FROM orders_archive WHERE merchant_id = ?)");
-    $stmt_orders->execute([$merchant_id, $merchant_id]);
-    $total_orders = (int)$stmt_orders->fetchColumn();
+    $total_orders = 0;
+    // إضافة الحماية هنا (try/catch) لمنع توقف الـ API إذا كانت جداول الطلبات غير موجودة بعد
+    try {
+        $stmt_orders = $pdo->prepare("SELECT (SELECT COUNT(*) FROM live_tickets WHERE merchant_id = ?) + (SELECT COUNT(*) FROM orders_archive WHERE merchant_id = ?)");
+        $stmt_orders->execute([$merchant_id, $merchant_id]);
+        $total_orders = (int)$stmt_orders->fetchColumn();
+    } catch (Exception $e) {
+        // في حال عدم وجود الجداول، نعتبر عدد الطلبات صفر
+        $total_orders = 0;
+    }
 
     $is_expired = ($expiry && strtotime($expiry) < time());
     $needs_subscription = false;
