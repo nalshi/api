@@ -1351,7 +1351,7 @@ try {
             }
 
             send_response('success', [
-                'status' => $sub_status,
+                'sub_status' => $sub_status, // تم تعديل الاسم لمنع التعارض
                 'marketing_message' => $marketing_message,
                 'plans' => $plans
             ]);
