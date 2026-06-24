@@ -32,7 +32,8 @@ function measure_performance($element_name, $callable) {
     
     // حفظ الرسالة في ملف نصي داخل نفس المجلد
     $log_file = __DIR__ . '/performance_log.txt';
- 
+    file_put_contents($log_file, $log_message, FILE_APPEND | LOCK_EX);
+
     return $result;
 }
 
@@ -99,7 +100,12 @@ if ($_SERVER['REQUEST_METHOD'] == 'OPTIONS') {
     exit();
 }
 
-if (!defined('APP_SECRET_KEY')) define('APP_SECRET_KEY', 'nalsh_fallback_secret_9988');
+$_app_secret = getenv("APP_SECRET_KEY") ?: ($_ENV["APP_SECRET_KEY"] ?? "");
+if (empty($_app_secret)) {
+    http_response_code(500);
+    die(json_encode(["status" => "error", "message" => "خطأ في إعدادات السيرفر: APP_SECRET_KEY مفقود من متغيرات البيئة."]));
+}
+if (!defined("APP_SECRET_KEY")) define("APP_SECRET_KEY", $_app_secret);
 
 // =======================================================
 // 2. إجبار استخدام HTTPS (تفعيل التشفير)
@@ -197,7 +203,7 @@ function sync_to_firebase($merchant_username, $node, $item_id, $data, $method = 
     }
     
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true);
     curl_setopt($ch, CURLOPT_TIMEOUT, 5);
     $response = curl_exec($ch);
     $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
@@ -245,7 +251,7 @@ function fb_request($path, $method = 'GET', $data = null) {
     $ch = curl_init($url);
     curl_setopt($ch, CURLOPT_CUSTOMREQUEST, $method);
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true);
     if ($data !== null) {
         curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data, JSON_UNESCAPED_UNICODE));
     }
@@ -269,7 +275,7 @@ function kv_request($path, $method = 'GET', $data = null) {
     $ch = curl_init($url);
     curl_setopt($ch, CURLOPT_CUSTOMREQUEST, $method);
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true);
     curl_setopt($ch, CURLOPT_TIMEOUT, 6); 
     
     $headers = ['Content-Type: application/json'];
@@ -454,7 +460,13 @@ function send_silent_push_to_merchant($merchant_fcm_token, $order_id) {
         'Content-Type: application/json'
     ]);
     curl_setopt($ch, CURLOPT_TIMEOUT, 2); 
-    curl_exec($ch);
+    $fcm_result = curl_exec($ch);
+    $fcm_http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    if (curl_errno($ch)) {
+        error_log("FCM Push Error: " . curl_error($ch));
+    } elseif ($fcm_http_code >= 400) {
+        error_log("FCM Push HTTP Error: $fcm_http_code | Response: $fcm_result");
+    }
     curl_close($ch);
 }
 
@@ -505,8 +517,10 @@ function sanitize_input($data) {
     if (is_array($data)) {
         return array_map('sanitize_input', $data);
     }
-    $data = trim($data ?? '');
-    return htmlspecialchars($data, ENT_QUOTES, 'UTF-8');
+    // ملاحظة: لا نستخدم htmlspecialchars هنا لأن PDO يحمي من SQL Injection تلقائياً،
+    // وتطبيق htmlspecialchars على البيانات المخزنة يُشوّه النصوص العربية والرموز.
+    // يجب تطبيق htmlspecialchars عند عرض البيانات في HTML فقط.
+    return trim($data ?? '');
 }
 function trigger_cache_rebuild($merchant_id, $merchant_username) {
     global $pdo;
@@ -804,9 +818,11 @@ function reassign_stale_orders($pdo) {
             }
             
             $order_ids_to_reset = array_column($stale_orders, 'id');
-            $placeholders = implode(',', array_fill(0, count($order_ids_to_reset), '?'));
-            $reset_stmt = $pdo->prepare("UPDATE orders SET delivery_agent_id = NULL, status = 'pending_delivery_acceptance', accepted_at = NULL, exclusive_agent_id = NULL, dispatch_queue = NULL, exclusive_until = NULL WHERE id IN ($placeholders)");
-            $reset_stmt->execute($order_ids_to_reset);
+            if (!empty($order_ids_to_reset)) {
+                $placeholders = implode(',', array_fill(0, count($order_ids_to_reset), '?'));
+                $reset_stmt = $pdo->prepare("UPDATE orders SET delivery_agent_id = NULL, status = 'pending_delivery_acceptance', accepted_at = NULL, exclusive_agent_id = NULL, dispatch_queue = NULL, exclusive_until = NULL WHERE id IN ($placeholders)");
+                $reset_stmt->execute($order_ids_to_reset);
+            }
         }
 
         $dispatch_stmt = $pdo->prepare(
@@ -934,12 +950,12 @@ try {
     }
 
     if (!empty($auth_header)) {
-        try {
+// APP_SECRET_KEY مُعرَّف بالفعل عند بداية الملف عبر متغيرات البيئة
             list($type, $token) = explode(' ', $auth_header, 2);
             if (strcasecmp($type, 'Bearer') == 0 && !empty($token)) {
                 $token_parts = explode('.', $token);
                 if (count($token_parts) === 3) {
-                    if (!defined('APP_SECRET_KEY')) define('APP_SECRET_KEY', 'nalsh_fallback_secret_9988');
+                    // APP_SECRET_KEY مُعرَّف بالفعل عند بداية الملف عبر متغيرات البيئة
                     list($header_enc, $payload_encoded, $signature_enc) = $token_parts;
                     $expected_sig = hash_hmac('sha256', "$header_enc.$payload_encoded", APP_SECRET_KEY, true);
                     
@@ -1665,7 +1681,7 @@ try {
                     'customer_name' => $cust['full_name'],
                     'role' => 'customer'
                 ];
-                if (!defined('APP_SECRET_KEY')) define('APP_SECRET_KEY', 'nalsh_fallback_secret_9988');
+                // APP_SECRET_KEY مُعرَّف بالفعل عند بداية الملف عبر متغيرات البيئة
                 $customer_jwt_token = generate_signed_token($payload_token, 43200); // 30 days
                 
                 session_write_close();
@@ -2066,6 +2082,8 @@ try {
                 $m_settings = json_decode($m_info['settings'] ?: '{}', true);
                 
                 $product_ids = array_map(function($i) { return $i['product_id'] ?? $i['listing_id'] ?? $i['id']; }, $items);
+                $product_ids = array_filter(array_values($product_ids)); // إزالة القيم الفارغة
+                if (empty($product_ids)) continue; // تجاهل التاجر إذا لم توجد منتجات صالحة
                 $placeholders = implode(',', array_fill(0, count($product_ids), '?'));
                 $params = array_merge([$merchant_id], $product_ids);
 
@@ -2422,16 +2440,11 @@ try {
                 }
 
                 // [ب] دفع الطلب إلى Firebase
+                // [ب] إرسال إشارة (Signal) لفايربيس لتنبيه التاجر بتحديث الطلبات
                 try {
-                    $merchant_secret_hash = md5($m_id . APP_SECRET_KEY . 'orders');
-                    $fb_order_data = $tick['ticket_data'];
-                    $fb_order_data['id'] = $tick['ticket_id'];
-                    $fb_order_data['status'] = $tick['status'];
-                    $fb_order_data['created_at'] = date('Y-m-d H:i:s');
-
-                    sync_to_firebase($m_username, "secure_active_orders/$merchant_secret_hash", $tick['ticket_id'], $fb_order_data, 'PUT');
+                    sync_to_firebase($m_username, "signals/orders_updated", null, time(), 'PUT');
                 } catch (Exception $fb_err) {
-                    error_log("Firebase order sync failed: " . $fb_err->getMessage());
+                    error_log("Firebase signal sync failed: " . $fb_err->getMessage());
                 }
                 
                 // [ج] إرسال الإشعارات الفورية
@@ -2813,7 +2826,7 @@ try {
             unset($_SESSION['login_selection_data']);
             
             $payload =['user_id' => $user['id'], 'username' => $user['username'], 'store_name' => $user['store_name'], 'role' => $user['role'], 'device_token' => $_COOKIE['device_token'] ?? ''];
-            if (!defined('APP_SECRET_KEY')) define('APP_SECRET_KEY', 'nalsh_fallback_secret_9988');
+            // APP_SECRET_KEY مُعرَّف بالفعل عند بداية الملف عبر متغيرات البيئة
             $token = generate_signed_token($payload, 480);
             
             $redirect = ($user['role'] === 'merchant') ? 'merchant-dashboard.php' : 'delivery-dashboard.php';
@@ -2876,13 +2889,16 @@ try {
 
             if (empty($valid_logins)) {
                 $account_ids = array_column($accounts, 'id');
+                if (empty($account_ids)) {
+                    throw new Exception("بيانات الدخول غير صحيحة.");
+                }
                 $placeholders = implode(',', array_fill(0, count($account_ids), '?'));
                 $pdo->prepare("UPDATE users SET failed_login_attempts = failed_login_attempts + 1 WHERE id IN ($placeholders)")->execute($account_ids);
                 $stmt_check = $pdo->prepare("SELECT MAX(failed_login_attempts) FROM users WHERE id IN ($placeholders)");
                 $stmt_check->execute($account_ids);
                 $current_attempts = $stmt_check->fetchColumn();
                 if ($current_attempts >= $max_attempts) {
-                    $pdo->prepare("UPDATE users SET lockout_until = DATE_ADD(NOW(), INTERVAL $lockout_time_minutes MINUTE) WHERE id IN ($placeholders)")->execute($account_ids);
+                    $pdo->prepare("UPDATE users SET lockout_until = DATE_ADD(NOW(), INTERVAL " . (int)$lockout_time_minutes . " MINUTE) WHERE id IN ($placeholders)")->execute($account_ids);
                     throw new Exception("تم قفل الحساب تحديداً لمدة 15 دقيقة بسبب تجاوز 5 محاولات فاشلة.");
                 }
                 $attempts_left = $max_attempts - $current_attempts;
@@ -2890,8 +2906,10 @@ try {
             }
 
             $successful_ids = array_column($valid_logins, 'id');
-            $placeholders_success = implode(',', array_fill(0, count($successful_ids), '?'));
-            $pdo->prepare("UPDATE users SET failed_login_attempts = 0, lockout_until = NULL WHERE id IN ($placeholders_success)")->execute($successful_ids);
+            if (!empty($successful_ids)) {
+                $placeholders_success = implode(',', array_fill(0, count($successful_ids), '?'));
+                $pdo->prepare("UPDATE users SET failed_login_attempts = 0, lockout_until = NULL WHERE id IN ($placeholders_success)")->execute($successful_ids);
+            }
 
             $device_token = $_COOKIE['device_token'] ?? '';
             $is_fully_trusted = false;
@@ -2939,7 +2957,7 @@ try {
             if (count($valid_logins) === 1) {
                 $user = $valid_logins[0];
 
-                if (!defined('APP_SECRET_KEY')) define('APP_SECRET_KEY', 'nalsh_fallback_secret_9988');
+                // APP_SECRET_KEY مُعرَّف بالفعل عند بداية الملف عبر متغيرات البيئة
 
                 $payload = [
                     'user_id' => $user['id'], 
@@ -2948,10 +2966,9 @@ try {
                     'role' => $user['role'],
                     'device_token' => $device_token // إضافة بصمة الجهاز
                 ];
-                $payload['firebase_secret_path'] = md5($user['id'] . APP_SECRET_KEY . 'orders');                   
+                // تم إزالة المسار السري لفايربيس لسد ثغرة الوصول المباشر
                 
                 $token = generate_signed_token($payload, 5256000); // 30 يوماً
-                
                 $needs_settings = false;
                 if ($user['role'] === 'merchant') {
                     $stmt_check = $pdo->prepare("SELECT store_type, settings FROM users WHERE id = ?");
@@ -3029,7 +3046,7 @@ try {
                 $_SESSION['device_token'] = $new_device_token;
                 
                 $payload = ['user_id' => $user['id'], 'username' => $user['username'], 'store_name' => $user['store_name'], 'role' => $user['role'], 'device_token' => $new_device_token];
-                if (!defined('APP_SECRET_KEY')) define('APP_SECRET_KEY', 'nalsh_fallback_secret_9988');
+                // APP_SECRET_KEY مُعرَّف بالفعل عند بداية الملف عبر متغيرات البيئة
                 $token = generate_signed_token($payload, 480);
                 
                 $redirect = ($user['role'] === 'merchant') ? 'merchant-dashboard.html' : 'delivery-dashboard.html';
@@ -3730,22 +3747,8 @@ $params = [
                 kv_request("stores/$m_username/products", 'PUT', $fb_products);
             }
 
-            $stmt_o = $pdo->prepare("SELECT ticket_id, ticket_data, status, created_at FROM live_tickets WHERE merchant_id = ?");
-            $stmt_o->execute([$user_id]);
-            $orders = $stmt_o->fetchAll(PDO::FETCH_ASSOC);
-            
-            $fb_orders = [];
-            foreach ($orders as $o) {
-                $data = json_decode($o['ticket_data'], true);
-                $data['id'] = $o['ticket_id'];
-                $data['status'] = $o['status'];
-                $data['created_at'] = $o['created_at'];
-                $fb_orders[$o['ticket_id']] = $data;
-            }
-            if (!empty($fb_orders)) {
-                $merchant_secret_hash = md5($user_id . APP_SECRET_KEY . 'orders');
-                sync_to_firebase($m_username, "secure_active_orders/$merchant_secret_hash", null, $fb_orders, 'PUT');
-            }
+            // بدلاً من رفع الطلبات لفايربيس، نرسل إشارة للمتصفح ليقوم بسحبها من الـ API المحمي
+            sync_to_firebase($m_username, "signals/orders_updated", null, time(), 'PUT');
 
             send_response('success', ['message' => "تم رفع $sync_count منتج وإعدادات المتجر إلى Firebase بنجاح!"]);
             break;      
@@ -4240,18 +4243,9 @@ $params = [
             $stmt->execute([$order_id, $user_id]);
             
             if ($stmt->rowCount() > 0) {
-                $get_order = $pdo->prepare("SELECT ticket_data, status FROM live_tickets WHERE ticket_id = ?");
-                $get_order->execute([$order_id]);
-                $o_data = $get_order->fetch(PDO::FETCH_ASSOC);
-                $fb_data = json_decode($o_data['ticket_data'], true);
-                $fb_data['id'] = $order_id;
-                $fb_data['status'] = $o_data['status'];
-                
-                // ⭐ تعديل أمني: استعلام مجهز لتأمين جلب اسم المستخدم للتاجر
+                // ⭐ تعديل أمني: إرسال إشارة تحديث بدلاً من البيانات الكاملة
                 $m_username = $_SESSION['username'] ?? get_username_by_id($pdo, $user_id);
-                $merchant_secret_hash = md5($user_id . APP_SECRET_KEY . 'orders');
-                
-                sync_to_firebase($m_username, "secure_active_orders/$merchant_secret_hash", $order_id, $fb_data, 'PUT');     
+                sync_to_firebase($m_username, "signals/orders_updated", null, time(), 'PUT');     
                 update_order_tracking($m_username, $order_id, 'confirmed_by_store');
                 
                 send_response('success', ['message' => 'تمت الموافقة على الطلب وجاري تجهيزه.']);
@@ -4277,20 +4271,10 @@ $params = [
             
             if ($stmt->rowCount() > 0) {
                 $get_order = $pdo->prepare("SELECT ticket_data FROM live_tickets WHERE ticket_id = ?");
-                $get_order->execute([$order_id]);
-                $o_data = $get_order->fetch(PDO::FETCH_ASSOC);
-                if($o_data) {
-                    $fb_data = json_decode($o_data['ticket_data'], true);
-                    $fb_data['id'] = $order_id;
-                    $fb_data['status'] = $new_status;
-                    
-                    // ⭐ تعديل أمني: استعلام مجهز لتأمين جلب اسم المستخدم للتاجر
-                    $m_username = $_SESSION['username'] ?? get_username_by_id($pdo, $user_id);
-                    $merchant_secret_hash = md5($user_id . APP_SECRET_KEY . 'orders');
-                    
-                    sync_to_firebase($m_username, "secure_active_orders/$merchant_secret_hash", $order_id, $fb_data, 'PUT');
-                    update_order_tracking($m_username, $order_id, $new_status);
-                }
+                $m_username = $_SESSION['username'] ?? get_username_by_id($pdo, $user_id);
+                // تحديث جرس الإشعارات فقط
+                sync_to_firebase($m_username, "signals/orders_updated", null, time(), 'PUT');
+                update_order_tracking($m_username, $order_id, $new_status);
                 send_response('success',['message' => 'تم تحديث حالة الطلب بنجاح.']);
             }
             else throw new Exception("فشل تحديث الحالة.");
@@ -4334,15 +4318,9 @@ $params = [
                 
                 $pdo->commit();
 
-                $ticket_data['id'] = $ticket_id;
-                $ticket_data['status'] = 'completed';
-                
-                // ⭐ تعديل أمني: استعلام مجهز لتأمين جلب اسم المستخدم للتاجر
                 $m_username = $_SESSION['username'] ?? get_username_by_id($pdo, $user_id);
-                $merchant_secret_hash = md5($user_id . APP_SECRET_KEY . 'orders');
-                
-                sync_to_firebase($m_username, "secure_archived_orders/$merchant_secret_hash", $ticket_id, $ticket_data, 'PUT');
-                sync_to_firebase($m_username, "secure_active_orders/$merchant_secret_hash", $ticket_id, null, 'DELETE');
+                // إرسال إشارة للمتصفح بجلب البيانات المحدثة
+                sync_to_firebase($m_username, "signals/orders_updated", null, time(), 'PUT');
                 update_order_tracking($m_username, $ticket_id, 'completed');
                 
                 send_response('success',['message' => 'تم تأكيد التسليم بنجاح وتوثيق الأرباح في رصيدك!']);
@@ -4745,10 +4723,8 @@ $params = [
                     trigger_cache_rebuild($user_id, $merchant_username);
                 }
 
-                // 3. مزامنة حالة الطلب مع Firebase
-                $merchant_secret_hash = md5($user_id . APP_SECRET_KEY . 'orders');
-                sync_to_firebase($merchant_username, "secure_archived_orders/$merchant_secret_hash", $order_id, $ticket_data, 'PUT');
-                sync_to_firebase($merchant_username, "secure_active_orders/$merchant_secret_hash", $order_id, null, 'DELETE');
+        // 3. إرسال إشارة تنبيه للمتصفح لتحديث الواجهة عبر الـ API
+                sync_to_firebase($merchant_username, "signals/orders_updated", null, time(), 'PUT');
                 update_order_tracking($merchant_username, $order_id, 'cancelled');
 
                 send_response('success', ['message' => 'تم إلغاء الطلب بنجاح وإعادة المنتجات للمخزون.']);
