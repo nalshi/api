@@ -950,10 +950,10 @@ try {
     }
 
     if (!empty($auth_header)) {
+        try {  // <====== قُم بإضافة هذا السطر هنا
 // APP_SECRET_KEY مُعرَّف بالفعل عند بداية الملف عبر متغيرات البيئة
             list($type, $token) = explode(' ', $auth_header, 2);
             if (strcasecmp($type, 'Bearer') == 0 && !empty($token)) {
-                $token_parts = explode('.', $token);
                 if (count($token_parts) === 3) {
                     // APP_SECRET_KEY مُعرَّف بالفعل عند بداية الملف عبر متغيرات البيئة
                     list($header_enc, $payload_encoded, $signature_enc) = $token_parts;
