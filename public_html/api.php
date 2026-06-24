@@ -954,6 +954,7 @@ try {
 // APP_SECRET_KEY مُعرَّف بالفعل عند بداية الملف عبر متغيرات البيئة
             list($type, $token) = explode(' ', $auth_header, 2);
             if (strcasecmp($type, 'Bearer') == 0 && !empty($token)) {
+                $token_parts = explode('.', $token); // ✅ إصلاح: تعريف $token_parts قبل استخدامه
                 if (count($token_parts) === 3) {
                     // APP_SECRET_KEY مُعرَّف بالفعل عند بداية الملف عبر متغيرات البيئة
                     list($header_enc, $payload_encoded, $signature_enc) = $token_parts;
@@ -3619,11 +3620,18 @@ try {
             
             $quantity_type = sanitize_input($_POST['quantity_type'] ?? 'tracked');
             $quantity = ($quantity_type === 'unlimited') ? 9999 : (int)($_POST['quantity'] ?? 0);
-            $is_available = (!empty($_POST['isAvailable']) || $_POST['isAvailable'] === 'on' || $_POST['isAvailable'] === 'true' || $_POST['isAvailable'] == 1) ? 1 : 0;
+            // ✅ إصلاح: قراءة صحيحة لـ isAvailable سواء جاء '1', 'on', 'true', أو 1
+            $is_available_raw = $_POST['isAvailable'] ?? '0';
+            $is_available = ($is_available_raw === '1' || $is_available_raw === 'on' || $is_available_raw === 'true' || $is_available_raw === true || intval($is_available_raw) === 1) ? 1 : 0;
             
             $name = sanitize_input($_POST['name'] ?? '');
             $desc = sanitize_input($_POST['mainDescription'] ?? '');
             $options = $_POST['sizes'] ?? '[]'; 
+            
+            // ✅ التحقق من البيانات المطلوبة
+            if (empty($name)) throw new Exception('اسم المنتج مطلوب ولا يمكن أن يكون فارغاً.');
+            if (empty($desc)) throw new Exception('وصف المنتج مطلوب.');
+            if ($sell_price <= 0) throw new Exception('سعر البيع يجب أن يكون أكبر من صفر.');
             
             // 3. معالجة التصنيف
             $category_id_input = sanitize_input($_POST['category_id'] ?? '');
@@ -4641,12 +4649,25 @@ $params = [
             if (!$user_id || !in_array($user_role, ['merchant', 'delivery'])) {
                 send_response('error', ['message' => 'غير مصرح لك بالوصول'], 401);
             }
-            $stmt = $pdo->prepare("SELECT id, username, store_name, phone, store_type, settings FROM users WHERE id = ?");
+            // ✅ إصلاح: جلب بيانات شاملة تشمل بيانات التسجيل الأولي
+            $stmt = $pdo->prepare("SELECT id, username, store_name, phone, store_type, settings, created_at FROM users WHERE id = ?");
             $stmt->execute([$user_id]);
             $merchantData = $stmt->fetch(PDO::FETCH_ASSOC);
             
             if ($merchantData) {
-                $merchantData['settings'] = json_decode($merchantData['settings'] ?: '{}', true);
+                // ✅ فك تشفير settings مع ضمان القيمة الافتراضية
+                if (!empty($merchantData['settings'])) {
+                    $decoded = json_decode($merchantData['settings'], true);
+                    $merchantData['settings'] = is_array($decoded) ? $decoded : [];
+                } else {
+                    $merchantData['settings'] = [];
+                }
+                
+                // ✅ إرجاع علم is_first_login ليعرف الفرونت أنه تسجيل أول
+                $merchantData['is_first_login'] = empty($merchantData['store_name']) || $merchantData['store_name'] === $merchantData['username'];
+                
+                // ✅ حساب طابع زمني للكاش ليعرف الفرونت متى يجدد
+                $merchantData['data_fetched_at'] = time();
                 
                 send_response('success', ['data' => $merchantData]);
             } else {
