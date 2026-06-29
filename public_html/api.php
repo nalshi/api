@@ -2546,6 +2546,35 @@ try {
             send_response('success', $response_data);
             break;
 
+        case 'check_orders_version':
+            // ⭐ نقطة فحص خفيفة جداً (بديل اقتصادي للـ Polling التقليدي).
+            // الهدف: السماح للوحة التحكم بالتحقق كل فترة قصيرة من وجود تغيير حقيقي
+            // في طلبات هذا التاجر فقط (بدون جلب أي بيانات فعلية)، فيتم جلب get_orders
+            // الكاملة فقط عند تغيّر البصمة. كل القيم مُحتسبة من السيرفر اعتماداً على
+            // user_id المستخرج من التوكن الموثّق، فلا يمكن للعميل التأثير عليها أو
+            // تزويرها بإرسال قيم من جهته.
+            if (!$user_id || $user_role !== 'merchant') send_response('error',['message' => 'غير مصرح لك بالوصول'], 401);
+            $m_id_v = intval($user_id);
+
+            $stmt_v = $pdo->prepare(
+                "SELECT COUNT(*) as cnt,
+                        COALESCE(MAX(created_at), '0') as last_created,
+                        COALESCE(SUM(CASE WHEN status='pending_merchant_approval' THEN 1 ELSE 0 END), 0) as pending_cnt
+                 FROM live_tickets WHERE merchant_id = ?"
+            );
+            $stmt_v->execute([$m_id_v]);
+            $row_v = $stmt_v->fetch(PDO::FETCH_ASSOC);
+
+            // بصمة مختصرة وآمنة لا تكشف أي بيانات حساسة، فقط تتغيّر إذا تغيّر شيء فعلي
+            $fingerprint = hash('sha256', $m_id_v . '|' . $row_v['cnt'] . '|' . $row_v['last_created'] . '|' . $row_v['pending_cnt']);
+
+            send_response('success', [
+                'version' => $fingerprint,
+                'active_count' => (int)$row_v['cnt'],
+                'pending_count' => (int)$row_v['pending_cnt']
+            ]);
+            break;
+
         case 'get_orders':
             if (!$user_id) send_response('error',['message' => 'غير مصرح لك بالوصول'], 401);
             $filter = sanitize_input($input['filter'] ?? 'active'); 
