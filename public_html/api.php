@@ -1,12 +1,17 @@
 <?php
 // =======================================================
-// ملف API الشامل (النسخة المتطورة أمنياً - الجدار الأمني 11.0)
+// ملف API الشامل (النسخة المتطورة أمنياً - الجدار الأمني 12.0)
 // ⭐ تم التحديث لدعم نظام المتاجر المتعددة (Multi-Vendor) ⭐
 // ⭐ التحديث الجديد: 
 // 1. دعم المزامنة اللحظية للمنتجات بدون تحديث الصفحة.
 // 2. إجبار المندوب والتاجر على إكمال الإعدادات الأساسية (موقع، نوع المحل).
 // 3. منع تجهيز الطلبات حتى يتم قبولها من قبل مندوب.
 // 4. حماية كاملة ومطلقة ضد ثغرات SQL Injection باستخدام الاستعلامات المجهزة.
+// 5. تم إلغاء الاعتماد على Cloudflare D1 بالكامل وتحويل كافة العمليات إلى TiDB Cloud (PDO).
+// 6. ⭐ تم إلغاء Cloudflare KV بالكامل - جميع ملفات JSON تُرفع مباشرة إلى GitHub API.
+//    ✅ كل ملف يُرفع بتوقيع HMAC-SHA256 في رسالة الـ Commit للتحقق من سلامة البيانات.
+//    ✅ بنية المسارات منظمة: stores/{username}/manifest.json, search_index.json, ...
+//    ✅ لا اعتماد على أي خدمة وسيطة - GitHub هو المصدر الوحيد للحقيقة (Single Source of Truth).
 // المسار: htdocs/public_html/api.php
 // =======================================================
 
@@ -30,7 +35,8 @@ function measure_performance($element_name, $callable) {
     
     // حفظ الرسالة في ملف نصي داخل نفس المجلد
     $log_file = __DIR__ . '/performance_log.txt';
- 
+    file_put_contents($log_file, $log_message, FILE_APPEND | LOCK_EX);
+
     return $result;
 }
 
@@ -53,8 +59,7 @@ header("Cache-Control: no-store, no-cache, must-revalidate, max-age=0");
 
 // 1. الجدار الناري الصارم: تحديد النطاقات المسموحة فقط
 $allowed_origins = [
-    'https://nyy.nyy.publicvm.com',
-    
+    'https://nalsh.vercel.app',
 ];
 
 $request_origin = $_SERVER['HTTP_ORIGIN'] ?? '';
@@ -98,7 +103,12 @@ if ($_SERVER['REQUEST_METHOD'] == 'OPTIONS') {
     exit();
 }
 
-if (!defined('APP_SECRET_KEY')) define('APP_SECRET_KEY', 'nalsh_fallback_secret_9988');
+$_app_secret = getenv("APP_SECRET_KEY") ?: ($_ENV["APP_SECRET_KEY"] ?? "");
+if (empty($_app_secret)) {
+    http_response_code(500);
+    die(json_encode(["status" => "error", "message" => "خطأ في إعدادات السيرفر: APP_SECRET_KEY مفقود من متغيرات البيئة."]));
+}
+if (!defined("APP_SECRET_KEY")) define("APP_SECRET_KEY", $_app_secret);
 
 // =======================================================
 // 2. إجبار استخدام HTTPS (تفعيل التشفير)
@@ -156,7 +166,7 @@ function get_store_name_by_id($pdo, $user_id) {
     $stmt->execute([$user_id]);
     return $stmt->fetchColumn() ?: '';
 }
-
+// دالة فحص اشتراك التاجر (النسخة الآمنة والمضادة للانهيار)
 // =======================================================
 // 🚀 نظام المزامنة الفائقة مع Firebase (محمي بمتغيرات البيئة)
 // =======================================================
@@ -190,14 +200,13 @@ function sync_to_firebase($merchant_username, $node, $item_id, $data, $method = 
     if ($method !== 'DELETE') {
         $json_data = json_encode($data, JSON_UNESCAPED_UNICODE);
         curl_setopt($ch, CURLOPT_POSTFIELDS, $json_data);
-        // 🚀 التعديل: إزالة Content-Length لأن cURL يحسبه تلقائياً وبشكل أدق
         curl_setopt($ch, CURLOPT_HTTPHEADER, [
             'Content-Type: application/json'
         ]);
     }
     
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true);
     curl_setopt($ch, CURLOPT_TIMEOUT, 5);
     $response = curl_exec($ch);
     $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
@@ -245,7 +254,7 @@ function fb_request($path, $method = 'GET', $data = null) {
     $ch = curl_init($url);
     curl_setopt($ch, CURLOPT_CUSTOMREQUEST, $method);
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true);
     if ($data !== null) {
         curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data, JSON_UNESCAPED_UNICODE));
     }
@@ -255,105 +264,156 @@ function fb_request($path, $method = 'GET', $data = null) {
 }
 
 // =======================================================
-// 🚀 نظام المزامنة الفائقة مع Cloudflare KV Storage
+// 🚀 نظام المزامنة الآمنة والمباشرة مع GitHub API
+// ✅ بديل Cloudflare KV - جميع العمليات تمر عبر GitHub فقط
+// ✅ كل commit يحمل توقيع HMAC-SHA256 للتحقق من سلامة البيانات
+// ✅ GET يجلب الملف من raw.githubusercontent.com (سريع + مجاني)
+// ✅ PUT/DELETE يستخدم GitHub Contents API (مصادقة Bearer Token)
 // =======================================================
+function gh_get_credentials() {
+    $token = getenv('GITHUB_TOKEN') ?: ($_ENV['GITHUB_TOKEN'] ?? '');
+    $owner = getenv('GITHUB_REPO_OWNER') ?: ($_ENV['GITHUB_REPO_OWNER'] ?? '');
+    $repo  = getenv('GITHUB_REPO_NAME')  ?: ($_ENV['GITHUB_REPO_NAME']  ?? '');
+    return [$token, $owner, $repo];
+}
+
+/**
+ * kv_request — واجهة متوافقة مع الكود القديم لكنها تعمل على GitHub مباشرة.
+ * 
+ * GET  → يجلب الملف من raw.githubusercontent.com (أسرع + لا تحتاج token للقراءة)
+ * PUT  → يرفع/يحدّث الملف عبر GitHub Contents API مع توقيع HMAC في رسالة الـ Commit
+ * DELETE → يحذف الملف عبر GitHub Contents API
+ *
+ * @param string $path   المسار النسبي مثل: stores/username/products_page_1
+ * @param string $method GET | PUT | DELETE
+ * @param mixed  $data   البيانات للرفع (مصفوفة أو null)
+ * @return array|null    البيانات عند GET، أو null عند PUT/DELETE
+ */
 function kv_request($path, $method = 'GET', $data = null) {
-    // تم إضافة getenv('WORKER_D1_URL') كبديل تلقائي لتلافي اختلاف المسميات في السيرفر ⭐
-    $kv_url = getenv('WORKER_CDN_URL') ?: getenv('WORKER_D1_URL') ?: $_SERVER['WORKER_CDN_URL'] ?? 'https://ny.nasermsasalsh.workers.dev/';
-    if (substr($kv_url, -1) !== '/') $kv_url .= '/';
-    
-    $kv_secret = getenv('WORKER_SECRET') ?: $_SERVER['WORKER_SECRET'] ?? ''; 
-    
-    $path = str_replace('.json', '', $path);
-    $url = $kv_url . ltrim($path, '/');
-    
-    $ch = curl_init($url);
-    curl_setopt($ch, CURLOPT_CUSTOMREQUEST, $method);
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
-    curl_setopt($ch, CURLOPT_TIMEOUT, 6); 
-    
-    $headers = ['Content-Type: application/json'];
-    
-    if ($method !== 'GET') {
-        if (empty($kv_secret)) throw new Exception("حماية النظام: مفتاح التخزين مفقود من إعدادات Render.");
-        $headers[] = 'Authorization: Bearer ' . $kv_secret;
-    }
-    
-    curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
-    if ($data !== null) {
-        curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data, JSON_UNESCAPED_UNICODE));
-    }
-    
-    $response = curl_exec($ch);
-    $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    curl_close($ch);
-    
-    if ($http_code == 401 || $http_code == 403) {
-        throw new Exception("تم رفض الوصول إلى Cloudflare (الرقم السري WORKER_SECRET غير متطابق).");
-    } elseif ($http_code >= 500) {
-        throw new Exception("حدث خطأ داخل سيرفر التخزين (Cloudflare Worker 500 Error). تأكد من ربط STORE_KV.");
-    } elseif ($http_code == 404) {
-        throw new Exception("المسار غير موجود في Worker Cloudflare (404 Error).");
-    }
-    
-    return json_decode($response, true);
-}
-// =======================================================
-// 🚀 نظام المزامنة الآمنة والسريعة مع GitHub API (مستودع JSON)
-// =======================================================
-function sync_to_github($path, $data, $method = 'PUT', $commit_message = "Auto-update from system") {
-    // جلب المفاتيح بأمان من Render
-    $gh_token = getenv('GITHUB_TOKEN') ?: $_ENV['GITHUB_TOKEN'] ?? '';
-    $gh_owner = getenv('GITHUB_REPO_OWNER') ?: $_ENV['GITHUB_REPO_OWNER'] ?? '';
-    $gh_repo  = getenv('GITHUB_REPO_NAME') ?: $_ENV['GITHUB_REPO_NAME'] ?? '';
+    [$gh_token, $gh_owner, $gh_repo] = gh_get_credentials();
 
-    // إيقاف الدالة بصمت إذا لم يتم إعداد المفاتيح (لحماية النظام من التوقف)
-    if (empty($gh_token) || empty($gh_owner) || empty($gh_repo)) return;
+    if (empty($gh_owner) || empty($gh_repo)) {
+        error_log("GitHub KV: GITHUB_REPO_OWNER أو GITHUB_REPO_NAME مفقود.");
+        return null;
+    }
 
-    $url = "https://api.github.com/repos/{$gh_owner}/{$gh_repo}/contents/" . ltrim($path, '/');
-    $headers = [
+    // ✅ تنظيف المسار: إزالة .json إذا أُضيفت عن طريق الخطأ
+    $clean_path = ltrim(str_replace('.json', '', $path), '/') . '.json';
+    $api_url    = "https://api.github.com/repos/{$gh_owner}/{$gh_repo}/contents/{$clean_path}";
+
+    $base_headers = [
         "Authorization: Bearer {$gh_token}",
         "Accept: application/vnd.github+json",
-        "User-Agent: Nalsh-Ecom-System/1.0",
-        "X-GitHub-Api-Version: 2022-11-28"
+        "User-Agent: Nalsh-Ecom-System/2.0",
+        "X-GitHub-Api-Version: 2022-11-28",
+        "Content-Type: application/json",
     ];
 
-    // 1. جلب الـ SHA الخاص بالملف (مطلوب أساسي في GitHub لتحديث ملف موجود)
-    $ch = curl_init($url);
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
-    curl_setopt($ch, CURLOPT_TIMEOUT, 2); // ثانيتين كحد أقصى حتى لا يعلق النظام
-    $response = curl_exec($ch);
-    $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    // ──────────────────────────────────────────────
+    // GET: جلب الملف من raw.githubusercontent.com (أسرع وبدون token)
+    // ──────────────────────────────────────────────
+    if ($method === 'GET') {
+        $raw_url = "https://raw.githubusercontent.com/{$gh_owner}/{$gh_repo}/main/{$clean_path}";
+        $ch = curl_init($raw_url);
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_SSL_VERIFYPEER => true,
+            CURLOPT_TIMEOUT        => 5,
+            CURLOPT_HTTPHEADER     => ["User-Agent: Nalsh-Ecom-System/2.0"],
+        ]);
+        $response  = curl_exec($ch);
+        $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+
+        if ($http_code === 200 && $response) {
+            return json_decode($response, true);
+        }
+        return null;
+    }
+
+    // ──────────────────────────────────────────────
+    // PUT / DELETE: يحتاج GitHub Token
+    // ──────────────────────────────────────────────
+    if (empty($gh_token)) {
+        error_log("GitHub KV: GITHUB_TOKEN مفقود - تعذّر تنفيذ {$method} على {$clean_path}");
+        return null;
+    }
+
+    // 1. جلب SHA الملف الحالي (مطلوب لأي تحديث أو حذف)
+    $ch = curl_init($api_url);
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_HTTPHEADER     => $base_headers,
+        CURLOPT_TIMEOUT        => 4,
+    ]);
+    $info_resp = curl_exec($ch);
+    $info_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
     curl_close($ch);
 
     $sha = null;
-    if ($http_code == 200) {
-        $file_info = json_decode($response, true);
-        $sha = $file_info['sha'] ?? null;
+    if ($info_code === 200) {
+        $file_meta = json_decode($info_resp, true);
+        $sha = $file_meta['sha'] ?? null;
     }
 
-    if ($method === 'DELETE' && !$sha) return; // لا حاجة للحذف إذا لم يكن الملف موجوداً
+    // DELETE: نحتاج SHA لأي عملية حذف
+    if ($method === 'DELETE') {
+        if (!$sha) return null; // الملف غير موجود أصلاً
+        $payload = [
+            "message" => "🗑️ Auto-delete: {$clean_path}",
+            "sha"     => $sha,
+        ];
+        $ch2 = curl_init($api_url);
+        curl_setopt_array($ch2, [
+            CURLOPT_CUSTOMREQUEST => 'DELETE',
+            CURLOPT_POSTFIELDS    => json_encode($payload),
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_HTTPHEADER    => $base_headers,
+            CURLOPT_TIMEOUT       => 8,
+        ]);
+        curl_exec($ch2);
+        curl_close($ch2);
+        return null;
+    }
 
-    // 2. تجهيز البيانات والتشفير
-    $payload = ["message" => $commit_message];
+    // PUT: رفع/تحديث الملف مع توقيع HMAC لضمان سلامة البيانات
+    $json_content  = json_encode($data, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+    $secret_key    = getenv('APP_SECRET_KEY') ?: ($_ENV['APP_SECRET_KEY'] ?? 'default_key');
+    $data_signature = hash_hmac('sha256', $json_content, $secret_key);
+    $timestamp      = date('Y-m-d H:i:s T');
+
+    $payload = [
+        "message" => "⚡ Auto-sync [{$clean_path}] | sig:{$data_signature} | {$timestamp}",
+        "content" => base64_encode($json_content),
+    ];
     if ($sha) $payload["sha"] = $sha;
-    
-    if ($method !== 'DELETE') {
-        $json_content = json_encode($data, JSON_UNESCAPED_UNICODE);
-        $payload["content"] = base64_encode($json_content); // GitHub يقبل Base64 فقط
+
+    $ch2 = curl_init($api_url);
+    curl_setopt_array($ch2, [
+        CURLOPT_CUSTOMREQUEST  => 'PUT',
+        CURLOPT_POSTFIELDS     => json_encode($payload),
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_HTTPHEADER     => $base_headers,
+        CURLOPT_TIMEOUT        => 10,
+    ]);
+    $put_resp = curl_exec($ch2);
+    $put_code = curl_getinfo($ch2, CURLINFO_HTTP_CODE);
+    curl_close($ch2);
+
+    if ($put_code >= 400) {
+        error_log("GitHub KV PUT فشل [{$put_code}] على {$clean_path}: {$put_resp}");
     }
 
-    // 3. إرسال التحديث إلى GitHub
-    $ch2 = curl_init($url);
-    curl_setopt($ch2, CURLOPT_CUSTOMREQUEST, $method);
-    curl_setopt($ch2, CURLOPT_POSTFIELDS, json_encode($payload));
-    curl_setopt($ch2, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch2, CURLOPT_HTTPHEADER, $headers);
-    curl_setopt($ch2, CURLOPT_TIMEOUT, 3); // 3 ثوانٍ للكتابة
-    curl_exec($ch2);
-    curl_close($ch2);
+    return null; // PUT لا يُعيد بيانات
+}
+// =======================================================
+// 🚀 sync_to_github — wrapper للتوافق العكسي مع الكود القديم
+// ✅ يُحوِّل كل استدعاء قديم إلى kv_request الموحّدة (GitHub مباشرة)
+// =======================================================
+function sync_to_github($path, $data, $method = 'PUT', $commit_message = "Auto-update from system") {
+    // kv_request تتولى SHA + Base64 + HMAC signature + رفع GitHub داخلياً
+    $clean_path = str_replace('.json', '', $path);
+    kv_request($clean_path, $method, $method !== 'DELETE' ? $data : null);
 }
 function simple_php_hash($str) {
     $hash = 0;
@@ -455,7 +515,13 @@ function send_silent_push_to_merchant($merchant_fcm_token, $order_id) {
         'Content-Type: application/json'
     ]);
     curl_setopt($ch, CURLOPT_TIMEOUT, 2); 
-    curl_exec($ch);
+    $fcm_result = curl_exec($ch);
+    $fcm_http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    if (curl_errno($ch)) {
+        error_log("FCM Push Error: " . curl_error($ch));
+    } elseif ($fcm_http_code >= 400) {
+        error_log("FCM Push HTTP Error: $fcm_http_code | Response: $fcm_result");
+    }
     curl_close($ch);
 }
 
@@ -506,109 +572,123 @@ function sanitize_input($data) {
     if (is_array($data)) {
         return array_map('sanitize_input', $data);
     }
-    $data = trim($data ?? '');
-    return htmlspecialchars($data, ENT_QUOTES, 'UTF-8');
+    // ملاحظة: لا نستخدم htmlspecialchars هنا لأن PDO يحمي من SQL Injection تلقائياً،
+    // وتطبيق htmlspecialchars على البيانات المخزنة يُشوّه النصوص العربية والرموز.
+    // يجب تطبيق htmlspecialchars عند عرض البيانات في HTML فقط.
+    return trim($data ?? '');
 }
 function trigger_cache_rebuild($merchant_id, $merchant_username) {
-    // جلب رابط الـ Worker السري
-    $worker_url = getenv('WORKER_D1_URL') ?: $_SERVER['WORKER_D1_URL'] ?? '';
-    $worker_secret = getenv('WORKER_SECRET') ?: $_SERVER['WORKER_SECRET'] ?? '';
-    
-    if (empty($worker_url) || empty($worker_secret)) return;
+    global $pdo;
+    if (!$pdo) return false;
 
-    // استخراج الدومين الأساسي للـ Worker
-    $parsed = parse_url($worker_url);
-    $base_worker_url = $parsed['scheme'] . '://' . $parsed['host'];
-    
-    // إرسال طلب خلفي للـ Worker ليقوم بجلب البيانات من D1 وبناء ملفات KV
-    $ch = curl_init($base_worker_url . "/api/rebuild-cache");
-    curl_setopt($ch, CURLOPT_CUSTOMREQUEST, 'POST');
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_TIMEOUT, 3); // 3 ثوانٍ للمزامنة السريعة
-    
-    $payload = json_encode([
-        'merchant_id' => $merchant_id,
-        'merchant_username' => $merchant_username
-    ]);
-    
-    curl_setopt($ch, CURLOPT_POSTFIELDS, $payload);
-    curl_setopt($ch, CURLOPT_HTTPHEADER, [
-        'Content-Type: application/json',
-        'Authorization: Bearer ' . $worker_secret
-    ]);
-    curl_exec($ch);
-    curl_close($ch);
-}
+    try {
+        // 1. جلب كافة المنتجات النشطة والمقبولة لهذا التاجر من TiDB Cloud
+$stmt = $pdo->prepare("SELECT * FROM products WHERE merchant_id = ? AND is_available = 1 AND (approval_status = 'approved' OR approval_status IS NULL OR approval_status = '')");
+        $stmt->execute([$merchant_id]);
+        $products = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-function d1_request($sql, $params = []) {
-    // 1. جلب بيانات الاعتماد مباشرة من بيئة العمل (Environment Variables) لضمان السرية التامة
-    $account_id  = getenv('CLOUDFLARE_ACCOUNT_ID') ?: $_ENV['CLOUDFLARE_ACCOUNT_ID'] ?? '';
-    $database_id = getenv('CLOUDFLARE_DATABASE_ID') ?: $_ENV['CLOUDFLARE_DATABASE_ID'] ?? '';
-    $api_token   = getenv('CLOUDFLARE_API_TOKEN') ?: $_ENV['CLOUDFLARE_API_TOKEN'] ?? '';
-    
-    if (empty($account_id) || empty($database_id) || empty($api_token)) {
-        throw new Exception("خطأ أمني حرج: بيانات الاتصال المباشر بـ Cloudflare D1 غير مكتملة في متغيرات البيئة.");
-    }
-    
-    // 2. تحديد المسار الرسمي لـ Cloudflare D1 Query API
-    $url = "https://api.cloudflare.com/client/v4/accounts/" . trim($account_id) . "/d1/database/" . trim($database_id) . "/query";
-    
-    // 3. تجهيز طلب cURL الآمن
-    $ch = curl_init($url);
-    curl_setopt($ch, CURLOPT_CUSTOMREQUEST, 'POST');
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_TIMEOUT, 8); // مهلة اتصال آمنة ومناسبة لمنع تجميد العمليات
-    
-    // تشفير الاستعلام والمعاملات (حماية مطلقة من SQL Injection عبر الاستعلامات المجهزة)
-    $payload = json_encode([
-        'sql' => $sql,
-        'params' => $params
-    ], JSON_UNESCAPED_UNICODE);
-    
-    curl_setopt($ch, CURLOPT_HTTPHEADER, [
-        'Content-Type: application/json',
-        'Authorization: Bearer ' . trim($api_token) // التوكن السري الممنوح من Cloudflare
-    ]);
-    curl_setopt($ch, CURLOPT_POSTFIELDS, $payload);
-    
-    $response = curl_exec($ch);
-    $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    $curl_error = curl_error($ch);
-    curl_close($ch);
-    
-    if ($response === false) {
-        throw new Exception("فشل الاتصال بقاعدة البيانات: " . $curl_error);
-    }
-    
-    $result = json_decode($response, true);
-    
-    // 4. فحص استجابة الخادم والتحقق من صحة التنفيذ
-    if ($http_code != 200 || !$result || !isset($result['success']) || !$result['success']) {
-        $error_msg = 'خطأ غير معروف في خادم التخزين';
-        if (isset($result['errors'][0]['message'])) {
-            $error_msg = $result['errors'][0]['message'] . " (رمز الخطأ: " . ($result['errors'][0]['code'] ?? '') . ")";
+        $timestamp = round(microtime(true) * 1000);
+        
+        // 2. إعداد كشاف البحث السريع (Search Index)
+        $searchIndex = [
+            '_version' => $timestamp,
+            'data' => []
+        ];
+        $categoriesSet = [];
+        $pages = [];
+        $PAGE_SIZE = 20;
+
+        foreach ($products as $p) {
+            $searchIndex['data'][] = [
+                'id' => $p['id'],
+                'n' => $p['name'],
+                'p' => (float)$p['price'],
+                'd' => (float)($p['discount'] ?? 0),
+                'i' => $p['image'] ?? '',
+                't' => $p['type'] ?? 'عام',
+                'a' => (int)($p['is_available'] ?? 1)
+            ];
+            
+            $cat = $p['type'] ?? 'عام';
+            if (!in_array($cat, $categoriesSet)) {
+                $categoriesSet[] = $cat;
+            }
         }
-        throw new Exception("Cloudflare D1 Error: " . $error_msg);
-    }
-    
-    // Cloudflare D1 يعيد مصفوفة من نتائج الاستعلامات في مفتاح 'result'
-    // وبما أننا نرسل استعلاماً فريداً دائماً، نأخذ العنصر الأول [0]
-    $query_result = $result['result'][0] ?? null;
-    if (!$query_result || !$query_result['success']) {
-        throw new Exception("فشل تنفيذ الاستعلام داخل البيئة السحابية.");
-    }
-    
-    // 5. المواءمة التلقائية مع بقية كود النظام الحالي:
-    // إذا كان الاستعلام للقراءة (SELECT)، نرجع النتائج مباشرة
-    // إذا كان استعلام كتابة (INSERT/UPDATE/DELETE)، نرجع معلومات التحديث (مثل عدد الصفوف المعدلة meta)
-    $is_select = preg_match('/^\s*(select|pragma|show|desc)/i', $sql);
-    if ($is_select) {
-        return $query_result['results'] ?? [];
-    } else {
-        return $query_result['meta'] ?? [];
+
+        // 3. تقسيم المنتجات إلى صفحات مجزأة (Pagination)
+        $chunks = array_chunk($products, $PAGE_SIZE);
+        foreach ($chunks as $index => $chunk) {
+            $pageNum = $index + 1;
+            $pageData = [];
+            foreach ($chunk as $p) {
+                $opts = [];
+                if (!empty($p['options'])) {
+                    $opts = json_decode($p['options'], true) ?: [];
+                }
+                $pageData[] = [
+                    'id' => $p['id'],
+                    'name' => $p['name'],
+                    'mainDescription' => $p['description'] ?? $p['mainDescription'] ?? '',
+                    'price' => (float)$p['price'],
+                    'discount' => (float)($p['discount'] ?? 0),
+                    'image' => $p['image'] ?? '',
+                    'type' => $p['type'] ?? 'عام',
+                    'options' => $opts,
+                    'quantity' => (int)($p['quantity'] ?? 0),
+                    'quantity_type' => $p['quantity_type'] ?? 'tracked',
+                    'is_available' => (int)($p['is_available'] ?? 1)
+                ];
+            }
+            $pages[$pageNum] = $pageData;
+        }
+
+        if (empty($pages)) {
+            $pages[1] = [];
+        }
+
+        $categoriesData = [
+            '_version' => $timestamp,
+            'data' => $categoriesSet
+        ];
+
+        $basePath = "stores/{$merchant_username}/";
+        $manifestVersions = [
+            'search' => $timestamp,
+            'categories' => $timestamp,
+            'info' => $timestamp,
+            'pages' => []
+        ];
+
+        // 4. ⭐ رفع جميع الملفات مباشرة إلى GitHub (بديل Cloudflare KV)
+        kv_request("{$basePath}search_index", 'PUT', $searchIndex);
+        kv_request("{$basePath}categories", 'PUT', $categoriesData);
+
+        foreach ($pages as $pageNum => $pageData) {
+            $pagePayload = [
+                '_version' => $timestamp,
+                'page' => $pageNum,
+                'total_pages' => count($pages),
+                'data' => $pageData
+            ];
+            kv_request("{$basePath}products_page_{$pageNum}", 'PUT', $pagePayload);
+            $manifestVersions['pages']["page_{$pageNum}"] = $timestamp;
+        }
+
+        // 5. رفع ملف المانيفست النهائي إلى GitHub
+        $manifestPayload = [
+            'version' => $timestamp,
+            'total_products' => count($products),
+            'total_pages' => count($pages),
+            'files' => $manifestVersions
+        ];
+        kv_request("{$basePath}manifest", 'PUT', $manifestPayload);
+
+        return true;
+    } catch (Exception $e) {
+        error_log("Failed to rebuild cache for merchant $merchant_id: " . $e->getMessage());
+        return false;
     }
 }
-
 function escape_like_search($search) {
     return str_replace(['\\', '%', '_'],['\\\\', '\%', '\_'], $search);
 }
@@ -662,9 +742,21 @@ function extract_coords_from_url($url) {
     return null;
 }
 
+/**
+ * update_kv_manifest — تحديث ملف manifest.json على GitHub مباشرة.
+ * يجلب المانيفست الحالي أولاً لدمج الـ files معه قبل الرفع.
+ */
 function update_kv_manifest($merchant_username) {
-    $manifest_data = ['version' => round(microtime(true) * 1000)];
-    kv_request("stores/$merchant_username/manifest", 'PUT', $manifest_data);
+    $timestamp = round(microtime(true) * 1000);
+
+    // جلب المانيفست الحالي من GitHub (إن وجد) لدمج البيانات
+    $current = kv_request("stores/$merchant_username/manifest", 'GET') ?: [];
+
+    $current['version']   = $timestamp;
+    $current['updated_at'] = date('Y-m-d H:i:s');
+
+    // رفع المانيفست المحدّث مباشرة إلى GitHub
+    kv_request("stores/$merchant_username/manifest", 'PUT', $current);
 }
 
 function is_valid_gps_location($url) {
@@ -708,6 +800,10 @@ function calculate_delivery_fee($distance_km) {
     // تقريب الرقم النهائي (مثلاً 520 تصبح 550)
     return ceil($total_fee / $rounding_factor) * $rounding_factor;
 }
+/**
+ * sync_merchant_info_json — مزامنة بيانات المتجر إلى GitHub مباشرة.
+ * ✅ لا يوجد Cloudflare KV — GitHub هو المصدر الوحيد.
+ */
 function sync_merchant_info_json($pdo, $user_id, $merchant_username) {
     $stmt = $pdo->prepare("SELECT store_name, store_type, phone, settings FROM users WHERE id = ?");
     $stmt->execute([$user_id]);
@@ -716,7 +812,7 @@ function sync_merchant_info_json($pdo, $user_id, $merchant_username) {
     if (!$user_record) return;
 
     $timestamp = round(microtime(true) * 1000);
-    $settings = json_decode($user_record['settings'] ?: '{}', true);
+    $settings  = json_decode($user_record['settings'] ?: '{}', true);
 
     $info_data = [
         '_version'   => $timestamp,
@@ -725,36 +821,21 @@ function sync_merchant_info_json($pdo, $user_id, $merchant_username) {
         'store_name' => $user_record['store_name'],
         'store_type' => $user_record['store_type'],
         'phone'      => $settings['phone'] ?? $user_record['phone'] ?? '',
-        'settings'   => $settings 
+        'settings'   => $settings,
     ];
 
-    // ⭐ تم إزالة try/catch لإجبار النظام على إظهار الخطأ لك إذا فشل KV
+    // 1. رفع info.json مباشرة إلى GitHub عبر kv_request (الموحّدة)
     kv_request("stores/$merchant_username/info", 'PUT', $info_data);
 
-    // 2. رفع ملف info.json إلى GitHub
-    sync_to_github("stores/$merchant_username/info.json", $info_data, 'PUT', "Update store info v$timestamp");
-
-    // 3. تحديث المانيفست على GitHub
-    $gh_owner = getenv('GITHUB_REPO_OWNER') ?: $_ENV['GITHUB_REPO_OWNER'] ?? '';
-    $gh_repo  = getenv('GITHUB_REPO_NAME') ?: $_ENV['GITHUB_REPO_NAME'] ?? '';
-    $gh_token = getenv('GITHUB_TOKEN') ?: $_ENV['GITHUB_TOKEN'] ?? '';
-    
-    $manifest_url = "https://raw.githubusercontent.com/{$gh_owner}/{$gh_repo}/main/stores/{$merchant_username}/manifest.json";
-    
-    $ch_m = curl_init($manifest_url);
-    curl_setopt($ch_m, CURLOPT_RETURNTRANSFER, true);
-    if(!empty($gh_token)) curl_setopt($ch_m, CURLOPT_HTTPHEADER, ["Authorization: Bearer {$gh_token}"]);
-    $manifest_response = curl_exec($ch_m);
-    
-    $current_manifest = json_decode($manifest_response, true) ?: [];
-    curl_close($ch_m);
+    // 2. تحديث المانيفست على GitHub
+    $manifest_path = "stores/$merchant_username/manifest";
+    $current_manifest = kv_request($manifest_path, 'GET') ?: [];
 
     $current_manifest['version'] = $timestamp;
     if (!isset($current_manifest['files'])) $current_manifest['files'] = [];
     $current_manifest['files']['info'] = $timestamp;
 
-    sync_to_github("stores/$merchant_username/manifest.json", $current_manifest, 'PUT', "Update manifest with info v$timestamp");
-    kv_request("stores/$merchant_username/manifest", 'PUT', $current_manifest);
+    kv_request($manifest_path, 'PUT', $current_manifest);
 }
 function reassign_stale_orders($pdo) {
     try {
@@ -780,9 +861,11 @@ function reassign_stale_orders($pdo) {
             }
             
             $order_ids_to_reset = array_column($stale_orders, 'id');
-            $placeholders = implode(',', array_fill(0, count($order_ids_to_reset), '?'));
-            $reset_stmt = $pdo->prepare("UPDATE orders SET delivery_agent_id = NULL, status = 'pending_delivery_acceptance', accepted_at = NULL, exclusive_agent_id = NULL, dispatch_queue = NULL, exclusive_until = NULL WHERE id IN ($placeholders)");
-            $reset_stmt->execute($order_ids_to_reset);
+            if (!empty($order_ids_to_reset)) {
+                $placeholders = implode(',', array_fill(0, count($order_ids_to_reset), '?'));
+                $reset_stmt = $pdo->prepare("UPDATE orders SET delivery_agent_id = NULL, status = 'pending_delivery_acceptance', accepted_at = NULL, exclusive_agent_id = NULL, dispatch_queue = NULL, exclusive_until = NULL WHERE id IN ($placeholders)");
+                $reset_stmt->execute($order_ids_to_reset);
+            }
         }
 
         $dispatch_stmt = $pdo->prepare(
@@ -858,6 +941,33 @@ register_shutdown_function(function() {
 try {
     require_once (__DIR__) . '/nalsh-user-admin-name.php';
     
+    // إنشاء وتهيئة الهيكل الموحد لجدول المنتجات في TiDB لضمان استقرار العمليات دون الحاجة لـ D1
+    try {
+        $pdo->exec("CREATE TABLE IF NOT EXISTS `products` (
+            `id` VARCHAR(100) PRIMARY KEY,
+            `merchant_id` INT NOT NULL,
+            `name` VARCHAR(255) NOT NULL,
+            `description` TEXT,
+            `price` DECIMAL(10,2) NOT NULL DEFAULT 0,
+            `cost_price` DECIMAL(10,2) DEFAULT 0,
+            `discount` DECIMAL(5,2) DEFAULT 0,
+            `image` TEXT,
+            `type` VARCHAR(100) DEFAULT 'عام',
+            `options` JSON,
+            `quantity` INT DEFAULT 0,
+            `quantity_type` ENUM('tracked', 'unlimited') DEFAULT 'tracked',
+            `is_available` TINYINT(1) DEFAULT 1,
+            `currency` VARCHAR(10) DEFAULT 'YER',
+            `updated_at` BIGINT,
+            `approval_status` VARCHAR(50) DEFAULT 'approved',
+            `isAvailable` TINYINT(1) DEFAULT 1,
+            `category_id` INT,
+            `department` VARCHAR(100) DEFAULT 'عام',
+            `keywords` TEXT,
+            INDEX `merchant_idx` (`merchant_id`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;");
+    } catch (Exception $e) {}
+
     $input =[];
     if (!empty(file_get_contents('php://input'))) {
         $input = json_decode(file_get_contents('php://input'), true) ?:[];
@@ -874,7 +984,7 @@ try {
         'auth_request_otp', 'auth_verify_otp', 'check_customer_session', 
         'login', 'check_phone', 'register_init', 'register_verify',
         'select_role', 'verify_new_device_otp', 'resend_device_otp',
-        'recover_init', 'recover_check_otp', 'recover_set_password', 'build_cache_cron'
+        'recover_init', 'recover_check_otp', 'recover_set_password', 'build_cache_cron',
     ];
 
     $auth_header = $_SERVER['HTTP_AUTHORIZATION'] ?? $_SERVER['Authorization'] ?? '';
@@ -883,12 +993,13 @@ try {
     }
 
     if (!empty($auth_header)) {
-        try {
+        try {  // <====== قُم بإضافة هذا السطر هنا
+// APP_SECRET_KEY مُعرَّف بالفعل عند بداية الملف عبر متغيرات البيئة
             list($type, $token) = explode(' ', $auth_header, 2);
             if (strcasecmp($type, 'Bearer') == 0 && !empty($token)) {
-                $token_parts = explode('.', $token);
+                $token_parts = explode('.', $token); // ✅ إصلاح: تعريف $token_parts قبل استخدامه
                 if (count($token_parts) === 3) {
-                    if (!defined('APP_SECRET_KEY')) define('APP_SECRET_KEY', 'nalsh_fallback_secret_9988');
+                    // APP_SECRET_KEY مُعرَّف بالفعل عند بداية الملف عبر متغيرات البيئة
                     list($header_enc, $payload_encoded, $signature_enc) = $token_parts;
                     $expected_sig = hash_hmac('sha256', "$header_enc.$payload_encoded", APP_SECRET_KEY, true);
                     
@@ -1132,7 +1243,7 @@ try {
                 'apiKey' => getenv('FCM_API_KEY') ?: '',
                 'authDomain' => getenv('FCM_AUTH_DOMAIN') ?: '',
                 'projectId' => getenv('FCM_PROJECT_ID') ?: '',
-               'messagingSenderId' => getenv('FCM_SENDER_ID') ?: '',
+                'messagingSenderId' => getenv('FCM_SENDER_ID') ?: '',
                 'appId' => getenv('FCM_APP_ID') ?: '',
                 'vapidKey' => getenv('FCM_VAPID_KEY') ?: ''
             ];
@@ -1173,7 +1284,8 @@ try {
             }
             throw new Exception("لم يتم استلام أي صورة صالحة.");
             break;
-
+// --- باقات الاشتراك الذكية للتجار ---
+        
         case 'save_fcm_token':
             if (!$user_id) send_response('error', ['message' => 'غير مصرح'], 401);
             $fcm_token = sanitize_input($input['fcm_token'] ?? '');
@@ -1183,8 +1295,7 @@ try {
             send_response('success');
             break;    
 
- case 'verify_cart_live':
-            case 'verify_cart_live':
+        case 'verify_cart_live':
             $cart_items = $input['items'] ?? [];
             if (empty($cart_items)) send_response('success', ['can_proceed' => true]);
 
@@ -1197,21 +1308,17 @@ try {
                 $size_id = $item['size_id'] ?? null;
                 $db_item = null;
 
-                // ⭐ إضافة الحماية (try-catch) لمنع انهيار السيرفر إذا لم تكن السحابة مجهزة
-                try {
-                    $d1_res = d1_request("SELECT price, quantity, quantity_type, is_available, discount, options FROM products WHERE id = ?", [$product_id]);
-                    $db_item = $d1_res[0] ?? null;
-                } catch (Exception $e) {
-                    // تجاهل الخطأ ليتم الاعتماد على قاعدة البيانات المحلية كبديل
-                }
+                // ⭐ جلب بيانات المنتج والكمية مباشرة من TiDB Cloud
+                $stmt_check = $pdo->prepare("SELECT price, quantity, quantity_type, is_available, discount, options FROM products WHERE id = ?");
+                $stmt_check->execute([$product_id]);
+                $db_item = $stmt_check->fetch(PDO::FETCH_ASSOC);
 
-                // الدعم العكسي: إذا لم يجده في D1، ابحث عنه في MySQL
+                // الدعم العكسي للمنتجات القديمة المخزنة بنمط Listings
                 if (!$db_item) {
                     $stmt_check = $pdo->prepare("SELECT l.merchant_price as price, l.quantity, l.quantity_type, l.is_available, p.discount, p.sizes as options FROM merchant_listings l JOIN products p ON l.global_product_id = p.id WHERE l.id = ? OR p.id = ?");
                     $stmt_check->execute([$product_id, $product_id]);
                     $db_item = $stmt_check->fetch(PDO::FETCH_ASSOC);
                 }
-                
 
                 if (!$db_item || $db_item['is_available'] == 0) {
                     $changes[] = "المنتج '{$item['name']}' نفد أو تم إخفاؤه. تم حذفه من سلتك.";
@@ -1223,7 +1330,7 @@ try {
                 $qty_type = $db_item['quantity_type'];
                 $base_price = (float)$db_item['price'];
 
-                // فحص المقاسات والخيارات (إن وجدت) داخل D1
+                // فحص المقاسات والخيارات (إن وجدت) داخل قاعدة البيانات الحية
                 if ($size_id && !empty($db_item['options'])) {
                     $options = json_decode($db_item['options'], true) ?: [];
                     $found_opt = false;
@@ -1249,7 +1356,7 @@ try {
                     }
                 }
 
-                // حساب السعر النهائي
+                // حساب السعر النهائي بعد الخصم
                 $real_price = $base_price * (1 - ($db_item['discount'] / 100));
                 if (abs((float)$real_price - (float)$item['price']) > 1) {
                     $changes[] = "تغير سعر '{$item['name']}' من {$item['price']} إلى {$real_price}.";
@@ -1257,7 +1364,7 @@ try {
                     $can_proceed = false;
                 }
 
-                // الفحص الصارم للكمية المطلوبة مقابل D1
+                // الفحص الصارم للكمية المطلوبة
                 if ($qty_type === 'tracked' && $available_qty < $item['qty']) {
                     $changes[] = "الكمية المتاحة من '{$item['name']}' هي {$available_qty} فقط.";
                     $item['qty'] = $available_qty;
@@ -1274,7 +1381,9 @@ try {
                 'new_cart' => $new_cart
             ]);
             break;
-
+// 1. التاجر يرسل رقم العملية من لوحة التحكم
+ // 1. التاجر يرسل رقم العملية (بدون أن نثق بالمبلغ الذي يحدده هو)
+        
         case 'get_initial_data':
             $stmt_settings = $pdo->query("SELECT setting_value FROM settings WHERE setting_key = 'store_settings'");
             $settings = json_decode($stmt_settings->fetchColumn() ?: '{}', true);
@@ -1616,7 +1725,7 @@ try {
                     'customer_name' => $cust['full_name'],
                     'role' => 'customer'
                 ];
-                if (!defined('APP_SECRET_KEY')) define('APP_SECRET_KEY', 'nalsh_fallback_secret_9988');
+                // APP_SECRET_KEY مُعرَّف بالفعل عند بداية الملف عبر متغيرات البيئة
                 $customer_jwt_token = generate_signed_token($payload_token, 43200); // 30 days
                 
                 session_write_close();
@@ -1707,7 +1816,6 @@ try {
         case 'get_user_data':
             if (!$customer_id) send_response('error',['message' => 'غير مسجل دخول'], 401);
             
-            // تم التعديل لجلب merchant_id و listing_id واسم المتجر
             $sql = "SELECT c.id, c.product_id, c.listing_id, c.merchant_id, c.size_id, c.quantity, 
                            p.name, p.price, p.discount, p.image, p.sizes, 
                            u.store_name as merchant_name 
@@ -1754,19 +1862,19 @@ try {
                 throw new Exception("معرّف المنتج غير صالح.");
             }
             
-            // 🚀 استعلام فوري من Cloudflare D1 لجلب الكمية الحقيقية اللحظية
-           // 🚀 استعلام فوري من Cloudflare D1 لجلب الكمية الحقيقية اللحظية
-$d1_res = d1_request("SELECT merchant_id, id as global_product_id, quantity, quantity_type, is_available, options FROM products WHERE id = ?", [$product_id]);
-$listing = $d1_res[0] ?? null;
+            // ⭐ استعلام مباشر من قاعدة بيانات TiDB Cloud لجلب التفاصيل اللحظية
+            $stmt_check = $pdo->prepare("SELECT merchant_id, id as global_product_id, quantity, quantity_type, is_available, options FROM products WHERE id = ?");
+            $stmt_check->execute([$product_id]);
+            $listing = $stmt_check->fetch(PDO::FETCH_ASSOC);
 
-// الدعم العكسي للمنتجات القديمة ومنتجات الكتالوج
-if (!$listing) {
-    $stmt_check = $pdo->prepare("SELECT l.merchant_id, p.id as global_product_id, l.quantity, l.quantity_type, l.is_available, p.sizes as options FROM merchant_listings l JOIN products p ON l.global_product_id = p.id WHERE l.id = ? OR p.id = ?");
-    $stmt_check->execute([$product_id, $product_id]);
-    $listing = $stmt_check->fetch(PDO::FETCH_ASSOC);
-}
+            // الدعم العكسي للمنتجات القديمة ومنتجات الكتالوج
+            if (!$listing) {
+                $stmt_check = $pdo->prepare("SELECT l.merchant_id, p.id as global_product_id, l.quantity, l.quantity_type, l.is_available, p.sizes as options FROM merchant_listings l JOIN products p ON l.global_product_id = p.id WHERE l.id = ? OR p.id = ?");
+                $stmt_check->execute([$product_id, $product_id]);
+                $listing = $stmt_check->fetch(PDO::FETCH_ASSOC);
+            }
 
-if (!$listing || $listing['is_available'] == 0) {
+            if (!$listing || $listing['is_available'] == 0) {
                 throw new Exception("هذا المنتج غير متاح للبيع من هذا التاجر حالياً.");
             }
 
@@ -1931,35 +2039,31 @@ if (!$listing || $listing['is_available'] == 0) {
 
                 $total_requested_qty += $qty;
                 
-                // ⭐ إصلاح ذكي 1: التقاط معرف التاجر بأي شكل كان مبرمجاً في السلة (ID أو Username)$m_id = $c_item['merchant_id'] ?? $c_item['user_id'] ?? $c_item['merchant_username'] ?? null;
-if ($m_id === 'null' || $m_id === 'undefined' || $m_id === '') $m_id = null;
+                $m_id = $c_item['merchant_id'] ?? $c_item['user_id'] ?? $c_item['merchant_username'] ?? null;
+                if ($m_id === 'null' || $m_id === 'undefined' || $m_id === '') $m_id = null;
 
-// ⭐ التعديل الذكي: إذا السلة لم ترسل رقم التاجر، نسحبه فوراً من D1 أو MySQL
-if (!$m_id) {
-    $product_id = $c_item['product_id'] ?? $c_item['listing_id'] ?? $c_item['id'] ?? null;
-    if ($product_id) {
-        try {
-            // محاولة الجلب من D1
-            $d1_res = d1_request("SELECT merchant_id FROM products WHERE id = ?", [$product_id]);
-            $m_id = $d1_res[0]['merchant_id'] ?? null;
-        } catch (Exception $e) {}
-        
-        // الدعم العكسي من MySQL
-        if (!$m_id) {
-            $stmt_find_m = $pdo->prepare("SELECT merchant_id FROM merchant_listings WHERE global_product_id = ? OR id = ?");
-            $stmt_find_m->execute([$product_id, $product_id]);
-            $m_id = $stmt_find_m->fetchColumn();
-        }
-    }
-}
+                // إذا السلة لم ترسل رقم التاجر، نسحبه فوراً من TiDB
+                if (!$m_id) {
+                    $product_id = $c_item['product_id'] ?? $c_item['listing_id'] ?? $c_item['id'] ?? null;
+                    if ($product_id) {
+                        $stmt_find_m = $pdo->prepare("SELECT merchant_id FROM products WHERE id = ?");
+                        $stmt_find_m->execute([$product_id]);
+                        $m_id = $stmt_find_m->fetchColumn();
+                        
+                        // الدعم العكسي من MySQL
+                        if (!$m_id) {
+                            $stmt_find_m = $pdo->prepare("SELECT merchant_id FROM merchant_listings WHERE global_product_id = ? OR id = ?");
+                            $stmt_find_m->execute([$product_id, $product_id]);
+                            $m_id = $stmt_find_m->fetchColumn();
+                        }
+                    }
+                }
 
-if (!$m_id) {
-    throw new Exception("عذراً، المنتج '" . ($c_item['name'] ?? 'غير معروف') . "' لم يعد متاحاً. يرجى حذفه من السلة.");
-}
+                if (!$m_id) {
+                    throw new Exception("عذراً، المنتج '" . ($c_item['name'] ?? 'غير معروف') . "' لم يعد متاحاً. يرجى حذفه من السلة.");
+                }
 
-// إعادة تعيين المتغير في المصفوفة ليتم استخدامه بشكل صحيح في باقي الكود
-$c_item['merchant_id'] = $m_id;
-                
+                $c_item['merchant_id'] = $m_id;
                 $grouped_by_merchant[$m_id][] = $c_item;
             }
 
@@ -1970,11 +2074,9 @@ $c_item['merchant_id'] = $m_id;
             $merchant_locations = [];
             $merchant_details = [];
 
-            // نحتفظ بالمفاتيح الأصلية للتعامل معها بأمان
             $raw_merchant_ids = array_keys($grouped_by_merchant);
 
             foreach ($raw_merchant_ids as $raw_m_id) {
-                // ⭐ إصلاح ذكي 2: البحث عن التاجر سواء كان الممرر ID رقمي أو Username نصي
                 $stmt_merchant = $pdo->prepare("SELECT id, username, store_name, settings FROM users WHERE id = ? OR username = ?");
                 $stmt_merchant->execute([$raw_m_id, $raw_m_id]);
                 $m_info = $stmt_merchant->fetch(PDO::FETCH_ASSOC);
@@ -1985,7 +2087,6 @@ $c_item['merchant_id'] = $m_id;
                 
                 $actual_m_id = $m_info['id'];
 
-                // إذا كان الممرر Username، نقوم بتصحيحه في المصفوفة ليصبح ID رقمي لكي لا تتعطل باقي الأكواد
                 if ((string)$raw_m_id !== (string)$actual_m_id) {
                     $grouped_by_merchant[$actual_m_id] = $grouped_by_merchant[$raw_m_id];
                     unset($grouped_by_merchant[$raw_m_id]);
@@ -2018,41 +2119,37 @@ $c_item['merchant_id'] = $m_id;
             $overall_cart_total = 0;
 
             // ========================================================
-            // 5. التحقق الصارم من الأسعار والمخزون عبر Cloudflare D1
+            // 5. التحقق الصارم من الأسعار والمخزون عبر TiDB Cloud (PDO)
             // ========================================================
             foreach ($grouped_by_merchant as $merchant_id => $items) {
                 $m_info = $merchant_details[$merchant_id];
                 $m_settings = json_decode($m_info['settings'] ?: '{}', true);
                 
-                // ⭐ إصلاح ذكي 3: سحب معرف المنتج بشكل دقيق أياً كان اسمه في السلة
                 $product_ids = array_map(function($i) { return $i['product_id'] ?? $i['listing_id'] ?? $i['id']; }, $items);
+                $product_ids = array_filter(array_values($product_ids)); // إزالة القيم الفارغة
+                if (empty($product_ids)) continue; // تجاهل التاجر إذا لم توجد منتجات صالحة
                 $placeholders = implode(',', array_fill(0, count($product_ids), '?'));
                 $params = array_merge([$merchant_id], $product_ids);
 
                 $d1_products = [];
-                $d1_error = null;
 
-                // 1. محاولة جلب المنتجات من Cloudflare D1
-                try {
-                    $d1_sql = "SELECT * FROM products WHERE merchant_id = ? AND id IN ($placeholders)";
-                    $d1_results = d1_request($d1_sql, $params);
-                    foreach($d1_results as $row) {
-                        $row['options'] = json_decode($row['options'] ?? '[]', true) ?: [];
-                        $d1_products[$row['id']] = $row;
-                    }
-                } catch (Exception $e) {
-                    // ⭐ التقاط خطأ السحابة بدلاً من تجاهله لمعرفة سبب المشكلة
-                    $d1_error = $e->getMessage();
+                // 1. جلب المنتجات مباشرة من جدول المنتجات الأساسي في TiDB
+                $stmt_p = $pdo->prepare("SELECT * FROM products WHERE merchant_id = ? AND id IN ($placeholders)");
+                $stmt_p->execute($params);
+                $d1_results = $stmt_p->fetchAll(PDO::FETCH_ASSOC);
+                foreach($d1_results as $row) {
+                    $row['options'] = json_decode($row['options'] ?? '[]', true) ?: [];
+                    $d1_products[$row['id']] = $row;
                 }
 
-                // 2. الدعم العكسي: جلب المنتجات من MySQL (merchant_listings) إذا كانت مفقودة
-                $pdo_sql = "
-                    SELECT p.id as global_product_id, p.name, p.image, p.sizes as options, p.discount, p.cost_price, 
-                           l.id as listing_id, l.merchant_price as price, l.quantity, l.quantity_type, l.currency, l.is_available 
-                    FROM merchant_listings l 
-                    JOIN products p ON l.global_product_id = p.id 
-                    WHERE l.merchant_id = ? AND (l.id IN ($placeholders) OR p.id IN ($placeholders))
-                ";
+                // 2. الدعم العكسي للمنتجات التي ما زالت في نظام listings القديم
+               $pdo_sql = "
+    SELECT p.id as global_product_id, p.name, p.image, p.options, p.discount, p.cost_price, 
+           l.id as listing_id, l.merchant_price as price, l.quantity, l.quantity_type, l.currency, l.is_available 
+    FROM merchant_listings l 
+    JOIN products p ON l.global_product_id = p.id 
+    WHERE l.merchant_id = ? AND (l.id IN ($placeholders) OR p.id IN ($placeholders))
+";
                 $stmt_pdo = $pdo->prepare($pdo_sql);
                 $params_pdo = array_merge([$merchant_id], $product_ids, $product_ids);
                 $stmt_pdo->execute($params_pdo);
@@ -2062,7 +2159,7 @@ $c_item['merchant_id'] = $m_id;
                     $pid = $row['global_product_id'];
                     $lid = $row['listing_id'];
                     
-                    $row['id'] = $pid; // توحيد المفتاح ليكون مطابق للطلب
+                    $row['id'] = $pid; 
                     $row['options'] = json_decode($row['options'] ?? '[]', true) ?: [];
                     
                     if (!isset($d1_products[$pid])) $d1_products[$pid] = $row;
@@ -2075,12 +2172,10 @@ $c_item['merchant_id'] = $m_id;
                 $merchant_item_count = 0;
 
                 foreach ($items as $item) {
-                    // الاعتماد على المعرف الذي تم العثور عليه
                     $product_id = $item['product_id'] ?? $item['listing_id'] ?? $item['id'];
                     
                     if (!isset($d1_products[$product_id])) {
                         $err_msg = "المنتج '{$item['name']}' نفد أو تم حذفه من متجر {$m_info['store_name']}.";
-                        if ($d1_error) $err_msg .= " (ملاحظة للسيرفر: $d1_error)";
                         throw new Exception($err_msg);
                     }
                     
@@ -2098,7 +2193,7 @@ $c_item['merchant_id'] = $m_id;
                     $item_option_id = $item['size_id'] ?? null;
                     $option_info = null;
                     $item_image = $product['image'];
-                    $base_price = (float)$product['price']; // السعر الحقيقي من السيرفر
+                    $base_price = (float)$product['price']; 
 
                     // معالجة الخيارات (Sizes/Colors)
                     if ($item_option_id && !empty($product['options'])) {
@@ -2106,7 +2201,6 @@ $c_item['merchant_id'] = $m_id;
                         foreach ($product['options'] as $opt) {
                             if (isset($opt['id']) && $opt['id'] === $item_option_id) {
                                 $option_info = $opt['name'] ?? null;
-                                // تحديث السعر إذا كان الخيار له سعر مختلف
                                 if (isset($opt['custom_price']) && $opt['custom_price'] !== null && $opt['custom_price'] !== '') {
                                     $base_price = (float)$opt['custom_price'];
                                 }
@@ -2128,7 +2222,6 @@ $c_item['merchant_id'] = $m_id;
                         throw new Exception("عذراً، الكمية المطلوبة من '{$product['name']}' غير كافية بالمخزون (المتاح: {$available_qty}).");
                     }
 
-                    // حساب السعر النهائي بعد الخصم المسجل في السيرفر
                     $final_secure_price = $base_price * (1 - ((float)($product['discount'] ?? 0) / 100));
                     $total_products_price += ($final_secure_price * $qty);
                     
@@ -2197,7 +2290,7 @@ $c_item['merchant_id'] = $m_id;
                     $m_info = $sub_order['merchant_info'];
                     $m_username = $m_info['username'];
                     
-                    // البحث عن طلب معلق سابق لنفس التاجر لدمجه (وفر رسوم التوصيل)
+                    // البحث عن طلب معلق سابق لنفس التاجر لدمجه
                     $stmt_check_pending = $pdo->prepare(
                         "SELECT ticket_id, ticket_data, status 
                          FROM live_tickets 
@@ -2305,23 +2398,21 @@ $c_item['merchant_id'] = $m_id;
                 if ($pdo->inTransaction()) $pdo->rollBack();
                 throw $e;
             }
-
-       // ========================================================
-            // 7. خصم المخزون من D1 وإرسال الطلبات لـ Firebase (Post-Processing)
+    
+            // ========================================================
+            // 7. خصم المخزون من TiDB وإرسال الطلبات لـ Firebase (Post-Processing)
             // ========================================================
             foreach ($created_tickets as $tick) {
                 $m_username = $tick['merchant_username'];
                 $m_id = $tick['merchant_id'];
                 
-                // [أ] تحديث المخزون (تم عزله في كتلة مستقلة لتلافي تعطيل المزامنة)
                 try {
                     $fb_products_update = [];
                     try {
-                        // جلب كاش المنتجات الحالي من Cloudflare
+                        // جلب كاش المنتجات الحالي من GitHub (عبر raw.githubusercontent.com)
                         $fb_products_update = kv_request("stores/$m_username/products") ?: []; 
                     } catch (Exception $kv_err) {
-                        // نتجاوز الخطأ بصمت (مثلاً لو كان المتجر جديداً والكاش غير متوفر 404)
-                        error_log("Ignored KV Fetch error: " . $kv_err->getMessage());
+                        error_log("Ignored GitHub fetch error: " . $kv_err->getMessage());
                     }
                     
                     $needs_github_sync = false; 
@@ -2345,9 +2436,9 @@ $c_item['merchant_id'] = $m_id;
                                 
                                 $opts_json = json_encode($options_array, JSON_UNESCAPED_UNICODE);
                                 
-                                // تحديث D1 للخيارات
-                                d1_request("UPDATE products SET quantity = ?, options = ?, updated_at = ? WHERE id = ? AND merchant_id = ?",
-                                    [$total_remaining_qty, $opts_json, time(), $pid, $m_id]);
+                                // تحديث TiDB للخيارات
+                                $stmt_deduct = $pdo->prepare("UPDATE products SET quantity = ?, options = ?, updated_at = ? WHERE id = ? AND merchant_id = ?");
+                                $stmt_deduct->execute([$total_remaining_qty, $opts_json, time(), $pid, $m_id]);
                                     
                                 // تجهيز بيانات المزامنة    
                                 if(isset($fb_products_update[$pid])) {
@@ -2360,9 +2451,9 @@ $c_item['merchant_id'] = $m_id;
                                     }
                                 }
                             } else {
-                                // تحديث D1 للمنتج العادي
-                                d1_request("UPDATE products SET quantity = quantity - ?, updated_at = ? WHERE id = ? AND merchant_id = ?",
-                                    [$item['quantity'], time(), $pid, $m_id]);
+                                // تحديث TiDB للمنتج العادي
+                                $stmt_deduct = $pdo->prepare("UPDATE products SET quantity = quantity - ?, updated_at = ? WHERE id = ? AND merchant_id = ?");
+                                $stmt_deduct->execute([$item['quantity'], time(), $pid, $m_id]);
                                     
                                 if(isset($fb_products_update[$pid])) {
                                     $new_qty = max(0, $item['current_db_qty'] - $item['quantity']);
@@ -2392,17 +2483,12 @@ $c_item['merchant_id'] = $m_id;
                     error_log("Inventory update failed: " . $inventory_err->getMessage());
                 }
 
-                // [ب] دفع الطلب إلى Firebase (بشكل مستقل لضمان وصوله مهما حدث في معالجة المخزون)
+                // [ب] دفع الطلب إلى Firebase
+                // [ب] إرسال إشارة (Signal) لفايربيس لتنبيه التاجر بتحديث الطلبات
                 try {
-                    $merchant_secret_hash = md5($m_id . APP_SECRET_KEY . 'orders');
-                    $fb_order_data = $tick['ticket_data'];
-                    $fb_order_data['id'] = $tick['ticket_id'];
-                    $fb_order_data['status'] = $tick['status'];
-                    $fb_order_data['created_at'] = date('Y-m-d H:i:s');
-
-                    sync_to_firebase($m_username, "secure_active_orders/$merchant_secret_hash", $tick['ticket_id'], $fb_order_data, 'PUT');
+                    sync_to_firebase($m_username, "signals/orders_updated", null, time(), 'PUT');
                 } catch (Exception $fb_err) {
-                    error_log("Firebase order sync failed: " . $fb_err->getMessage());
+                    error_log("Firebase signal sync failed: " . $fb_err->getMessage());
                 }
                 
                 // [ج] إرسال الإشعارات الفورية
@@ -2784,7 +2870,7 @@ $c_item['merchant_id'] = $m_id;
             unset($_SESSION['login_selection_data']);
             
             $payload =['user_id' => $user['id'], 'username' => $user['username'], 'store_name' => $user['store_name'], 'role' => $user['role'], 'device_token' => $_COOKIE['device_token'] ?? ''];
-            if (!defined('APP_SECRET_KEY')) define('APP_SECRET_KEY', 'nalsh_fallback_secret_9988');
+            // APP_SECRET_KEY مُعرَّف بالفعل عند بداية الملف عبر متغيرات البيئة
             $token = generate_signed_token($payload, 480);
             
             $redirect = ($user['role'] === 'merchant') ? 'merchant-dashboard.php' : 'delivery-dashboard.php';
@@ -2847,13 +2933,16 @@ $c_item['merchant_id'] = $m_id;
 
             if (empty($valid_logins)) {
                 $account_ids = array_column($accounts, 'id');
+                if (empty($account_ids)) {
+                    throw new Exception("بيانات الدخول غير صحيحة.");
+                }
                 $placeholders = implode(',', array_fill(0, count($account_ids), '?'));
                 $pdo->prepare("UPDATE users SET failed_login_attempts = failed_login_attempts + 1 WHERE id IN ($placeholders)")->execute($account_ids);
                 $stmt_check = $pdo->prepare("SELECT MAX(failed_login_attempts) FROM users WHERE id IN ($placeholders)");
                 $stmt_check->execute($account_ids);
                 $current_attempts = $stmt_check->fetchColumn();
                 if ($current_attempts >= $max_attempts) {
-                    $pdo->prepare("UPDATE users SET lockout_until = DATE_ADD(NOW(), INTERVAL $lockout_time_minutes MINUTE) WHERE id IN ($placeholders)")->execute($account_ids);
+                    $pdo->prepare("UPDATE users SET lockout_until = DATE_ADD(NOW(), INTERVAL " . (int)$lockout_time_minutes . " MINUTE) WHERE id IN ($placeholders)")->execute($account_ids);
                     throw new Exception("تم قفل الحساب تحديداً لمدة 15 دقيقة بسبب تجاوز 5 محاولات فاشلة.");
                 }
                 $attempts_left = $max_attempts - $current_attempts;
@@ -2861,8 +2950,10 @@ $c_item['merchant_id'] = $m_id;
             }
 
             $successful_ids = array_column($valid_logins, 'id');
-            $placeholders_success = implode(',', array_fill(0, count($successful_ids), '?'));
-            $pdo->prepare("UPDATE users SET failed_login_attempts = 0, lockout_until = NULL WHERE id IN ($placeholders_success)")->execute($successful_ids);
+            if (!empty($successful_ids)) {
+                $placeholders_success = implode(',', array_fill(0, count($successful_ids), '?'));
+                $pdo->prepare("UPDATE users SET failed_login_attempts = 0, lockout_until = NULL WHERE id IN ($placeholders_success)")->execute($successful_ids);
+            }
 
             $device_token = $_COOKIE['device_token'] ?? '';
             $is_fully_trusted = false;
@@ -2910,7 +3001,7 @@ $c_item['merchant_id'] = $m_id;
             if (count($valid_logins) === 1) {
                 $user = $valid_logins[0];
 
-                if (!defined('APP_SECRET_KEY')) define('APP_SECRET_KEY', 'nalsh_fallback_secret_9988');
+                // APP_SECRET_KEY مُعرَّف بالفعل عند بداية الملف عبر متغيرات البيئة
 
                 $payload = [
                     'user_id' => $user['id'], 
@@ -2919,10 +3010,9 @@ $c_item['merchant_id'] = $m_id;
                     'role' => $user['role'],
                     'device_token' => $device_token // إضافة بصمة الجهاز
                 ];
-                $payload['firebase_secret_path'] = md5($user['id'] . APP_SECRET_KEY . 'orders');                   
+                // تم إزالة المسار السري لفايربيس لسد ثغرة الوصول المباشر
                 
                 $token = generate_signed_token($payload, 5256000); // 30 يوماً
-                
                 $needs_settings = false;
                 if ($user['role'] === 'merchant') {
                     $stmt_check = $pdo->prepare("SELECT store_type, settings FROM users WHERE id = ?");
@@ -3000,7 +3090,7 @@ $c_item['merchant_id'] = $m_id;
                 $_SESSION['device_token'] = $new_device_token;
                 
                 $payload = ['user_id' => $user['id'], 'username' => $user['username'], 'store_name' => $user['store_name'], 'role' => $user['role'], 'device_token' => $new_device_token];
-                if (!defined('APP_SECRET_KEY')) define('APP_SECRET_KEY', 'nalsh_fallback_secret_9988');
+                // APP_SECRET_KEY مُعرَّف بالفعل عند بداية الملف عبر متغيرات البيئة
                 $token = generate_signed_token($payload, 480);
                 
                 $redirect = ($user['role'] === 'merchant') ? 'merchant-dashboard.html' : 'delivery-dashboard.html';
@@ -3132,10 +3222,10 @@ $c_item['merchant_id'] = $m_id;
             ];
 
             $fb_url = getenv('FIREBASE_DB_URL') ?: $_ENV['FIREBASE_DB_URL'] ?: 'https://shiban-a2757-default-rtdb.europe-west1.firebasedatabase.app/';
-if (substr($fb_url, -1) !== '/') $fb_url .= '/';
-$fb_secret = getenv('FIREBASE_DB_SECRET') ?: $_ENV['FIREBASE_DB_SECRET'] ?: '';
+            if (substr($fb_url, -1) !== '/') $fb_url .= '/';
+            $fb_secret = getenv('FIREBASE_DB_SECRET') ?: $_ENV['FIREBASE_DB_SECRET'] ?: '';
 
-$ch = curl_init($fb_url . "stores/" . $merchant_username . ".json?auth=" . $fb_secret);
+            $ch = curl_init($fb_url . "stores/" . $merchant_username . ".json?auth=" . $fb_secret);
             curl_setopt($ch, CURLOPT_CUSTOMREQUEST, "PUT");
             curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($initData, JSON_UNESCAPED_UNICODE));
             curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
@@ -3557,12 +3647,11 @@ $ch = curl_init($fb_url . "stores/" . $merchant_username . ".json?auth=" . $fb_s
             send_response('success',['number' => $num]);
             break;
 
-      case 'save_product':
+        case 'save_product':     
             // 1. التحقق من الصلاحيات
             if (!$user_id || $user_role !== 'merchant') {
                 send_response('error', ['message' => 'غير مصرح لك بإضافة أو تعديل المنتجات.'], 401);
             }
-            
             // 2. تنظيف المدخلات
             $pid = !empty($_POST['id']) ? sanitize_input($_POST['id']) : 'prod_' . generate_uuid();
             $is_edit = !empty($_POST['id']);
@@ -3574,11 +3663,18 @@ $ch = curl_init($fb_url . "stores/" . $merchant_username . ".json?auth=" . $fb_s
             
             $quantity_type = sanitize_input($_POST['quantity_type'] ?? 'tracked');
             $quantity = ($quantity_type === 'unlimited') ? 9999 : (int)($_POST['quantity'] ?? 0);
-            $is_available = (!empty($_POST['isAvailable']) || $_POST['isAvailable'] === 'on' || $_POST['isAvailable'] === 'true' || $_POST['isAvailable'] == 1) ? 1 : 0;
+            // ✅ إصلاح: قراءة صحيحة لـ isAvailable سواء جاء '1', 'on', 'true', أو 1
+            $is_available_raw = $_POST['isAvailable'] ?? '0';
+            $is_available = ($is_available_raw === '1' || $is_available_raw === 'on' || $is_available_raw === 'true' || $is_available_raw === true || intval($is_available_raw) === 1) ? 1 : 0;
             
             $name = sanitize_input($_POST['name'] ?? '');
             $desc = sanitize_input($_POST['mainDescription'] ?? '');
             $options = $_POST['sizes'] ?? '[]'; 
+            
+            // ✅ التحقق من البيانات المطلوبة
+            if (empty($name)) throw new Exception('اسم المنتج مطلوب ولا يمكن أن يكون فارغاً.');
+            if (empty($desc)) throw new Exception('وصف المنتج مطلوب.');
+            if ($sell_price <= 0) throw new Exception('سعر البيع يجب أن يكون أكبر من صفر.');
             
             // 3. معالجة التصنيف
             $category_id_input = sanitize_input($_POST['category_id'] ?? '');
@@ -3629,34 +3725,36 @@ $ch = curl_init($fb_url . "stores/" . $merchant_username . ".json?auth=" . $fb_s
                 throw new Exception('سعر البيع يجب أن يكون أعلى من التكلفة.');
             }
 
-            // 5. الحفظ في Cloudflare D1 بأمان تام
+    // 5. الحفظ المباشر والآمن في قاعدة بيانات TiDB Cloud (PDO)
             if ($is_edit) {
+                // استبدل استعلام الـ UPDATE القديم بهذا:
                 $sql = "UPDATE products SET 
                         name = ?, description = ?, price = ?, cost_price = ?, discount = ?, 
                         image = ?, type = ?, options = ?, quantity = ?, quantity_type = ?, 
-                        is_available = ?, currency = ?, updated_at = ?
+                        is_available = ?, currency = ?, updated_at = ?, approval_status = 'approved'
                         WHERE id = ? AND merchant_id = ?";
                 $params = [
                     $name, $desc, $sell_price, $cost_price, $discount_percent, 
                     $img, $category_name, $options, $quantity, $quantity_type, 
                     $is_available, $currency, time(), $pid, $user_id
                 ];
-                $result = d1_request($sql, $params);
-                if (isset($result['changes']) && $result['changes'] == 0) {
-                    throw new Exception("لم يتم التعديل. المنتج غير موجود أو لا تملك صلاحية تعديله.");
-                }
+                $stmt_save = $pdo->prepare($sql);
+                $stmt_save->execute($params);
             } else {
-                $sql = "INSERT INTO products 
-                        (id, merchant_id, name, description, price, cost_price, discount, image, type, options, quantity, quantity_type, is_available, currency, updated_at) 
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
-                $params = [
-                    $pid, $user_id, $name, $desc, $sell_price, $cost_price, $discount_percent, 
-                    $img, $category_name, $options, $quantity, $quantity_type, $is_available, $currency, time()
-                ];
-                d1_request($sql, $params);
+                // استبدل استعلام الـ INSERT القديم بهذا:
+$sql = "INSERT INTO products 
+        (id, merchant_id, name, description, price, cost_price, discount, image, type, options, quantity, quantity_type, is_available, currency, updated_at, approval_status) 
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'approved')";
+$params = [
+    $pid, $user_id, $name, $desc, $sell_price, $cost_price, $discount_percent, 
+    $img, $category_name, $options, $quantity, $quantity_type, 
+    $is_available, $currency, time()
+];
+                $stmt_save = $pdo->prepare($sql);
+                $stmt_save->execute($params);
             }
 
-            // 🚀 6. النظام الجديد: إعطاء أمر للـ Worker ببناء الكاش في KV بدون تعطيل الباك اند
+            // 🚀 6. إعادة بناء الكاش بشكل صامت لإبقاء البيانات متطابقة
             $merchant_username = $_SESSION['username'] ?? get_username_by_id($pdo, $user_id);
             trigger_cache_rebuild($user_id, $merchant_username);
             
@@ -3679,11 +3777,12 @@ $ch = curl_init($fb_url . "stores/" . $merchant_username . ".json?auth=" . $fb_s
                 $m_data['settings'] = json_decode($m_data['settings'] ?: '{}', true);
                 sync_to_firebase($m_username, 'info', null, $m_data, 'PUT');
                 
-                // ⭐ إضافة مهمة: إجبار تحديث ملف info.json على GitHub أيضاً
+                // ⭐ إجبار تحديث ملف info.json على GitHub أيضاً
                 sync_merchant_info_json($pdo, $user_id, $m_username);
             }
 
-            $sql_prods = "SELECT p.id as global_product_id, p.name, p.mainDescription as description, p.image, p.sizes as options, p.discount, p.department, p.category_id, l.id as listing_id, l.merchant_price as price, l.quantity, l.quantity_type, l.currency, c.name as type, u.id as merchant_id, u.username as merchant_username, u.store_name as merchant_name FROM merchant_listings l JOIN products p ON l.global_product_id = p.id JOIN users u ON l.merchant_id = u.id LEFT JOIN categories c ON p.category_id = c.id WHERE l.merchant_id = ? AND l.is_available = 1";
+            // تعديل الاستعلام للمزامنة من جدول المنتجات الأساسي
+            $sql_prods = "SELECT p.id as global_product_id, p.name, p.description, p.image, p.options, p.discount, p.department, p.category_id, p.price, p.quantity, p.quantity_type, p.currency, p.type, u.id as merchant_id, u.username as merchant_username, u.store_name as merchant_name FROM products p JOIN users u ON p.merchant_id = u.id WHERE p.merchant_id = ? AND p.is_available = 1";
             $stmt_p = $pdo->prepare($sql_prods);
             $stmt_p->execute([$user_id]);
             $products = $stmt_p->fetchAll(PDO::FETCH_ASSOC);
@@ -3699,22 +3798,8 @@ $ch = curl_init($fb_url . "stores/" . $merchant_username . ".json?auth=" . $fb_s
                 kv_request("stores/$m_username/products", 'PUT', $fb_products);
             }
 
-            $stmt_o = $pdo->prepare("SELECT ticket_id, ticket_data, status, created_at FROM live_tickets WHERE merchant_id = ?");
-            $stmt_o->execute([$user_id]);
-            $orders = $stmt_o->fetchAll(PDO::FETCH_ASSOC);
-            
-            $fb_orders = [];
-            foreach ($orders as $o) {
-                $data = json_decode($o['ticket_data'], true);
-                $data['id'] = $o['ticket_id'];
-                $data['status'] = $o['status'];
-                $data['created_at'] = $o['created_at'];
-                $fb_orders[$o['ticket_id']] = $data;
-            }
-            if (!empty($fb_orders)) {
-                $merchant_secret_hash = md5($user_id . APP_SECRET_KEY . 'orders');
-                sync_to_firebase($m_username, "secure_active_orders/$merchant_secret_hash", null, $fb_orders, 'PUT');
-            }
+            // بدلاً من رفع الطلبات لفايربيس، نرسل إشارة للمتصفح ليقوم بسحبها من الـ API المحمي
+            sync_to_firebase($m_username, "signals/orders_updated", null, time(), 'PUT');
 
             send_response('success', ['message' => "تم رفع $sync_count منتج وإعدادات المتجر إلى Firebase بنجاح!"]);
             break;      
@@ -3727,7 +3812,7 @@ $ch = curl_init($fb_url . "stores/" . $merchant_username . ".json?auth=" . $fb_s
 
             $sql = "
                 SELECT 
-                    p.id, p.name, p.image, p.sizes, c.name as type,
+                    p.id, p.name, p.image, p.sizes as options, c.name as type,
                     l.id as listing_id
                 FROM products p
                 LEFT JOIN categories c ON p.category_id = c.id
@@ -3751,8 +3836,7 @@ $ch = curl_init($fb_url . "stores/" . $merchant_username . ".json?auth=" . $fb_s
 
             foreach ($products as &$product) {
                 $product['is_listed'] = !empty($product['listing_id']);
-                $product['options'] = json_decode($product['sizes'] ?? '[]', true);
-                unset($product['sizes']);
+                $product['options'] = json_decode($product['options'] ?? '[]', true);
                 unset($product['listing_id']);
             }
             
@@ -3787,7 +3871,7 @@ $ch = curl_init($fb_url . "stores/" . $merchant_username . ".json?auth=" . $fb_s
                 throw new Exception("بيانات المنتج غير مكتملة. يرجى إدخال السعر على الأقل.");
             }
 
-            $stmt_check = $pdo->prepare("SELECT id, sizes, base_price FROM products WHERE id = ? AND approval_status = 'approved'");
+            $stmt_check = $pdo->prepare("SELECT id, options, price FROM products WHERE id = ? AND approval_status = 'approved'");
             $stmt_check->execute([$global_id]);
             $global_product = $stmt_check->fetch(PDO::FETCH_ASSOC);
 
@@ -3797,7 +3881,7 @@ $ch = curl_init($fb_url . "stores/" . $merchant_username . ".json?auth=" . $fb_s
             
             $price_variables = null;
             if (!empty($selected_options_ids) && is_array($selected_options_ids)) {
-                $global_options = json_decode($global_product['sizes'] ?? '[]', true);
+                $global_options = json_decode($global_product['options'] ?? '[]', true);
                 $global_option_ids = array_column($global_options, 'id');
                 $valid_options = array_intersect($selected_options_ids, $global_option_ids);
                 if (count($valid_options) > 0) { $price_variables = json_encode(['selected_options' => $valid_options]); }
@@ -3819,32 +3903,31 @@ $ch = curl_init($fb_url . "stores/" . $merchant_username . ".json?auth=" . $fb_s
             
             $term = strtolower(sanitize_input($input['term'] ?? ''));
             $page = max(1, (int)($input['page'] ?? 1));
-            // رفعنا الليمت قليلاً لضمان جلب أكبر قدر ممكن في أول سحبة
             $limit = max(1, min(100, (int)($input['limit'] ?? 15))); 
             $offset = ($page - 1) * $limit;
             
             $merged_products = [];
             $seen_ids = [];
 
-            // 1. محاولة الجلب من D1 السحابية (النظام الجديد)
+            // 1. استرجاع المنتجات من TiDB Cloud (PDO) مباشرة دون الحاجة لـ D1
             try {
-                $sql_d1 = "SELECT * FROM products WHERE merchant_id = ?";
-                $params_d1 = [$user_id];
+                $sql_tidb = "SELECT * FROM products WHERE merchant_id = ?";
+                $params_tidb = [$user_id];
 
                 if ($term) {
-                    $sql_d1 .= " AND (name LIKE ? OR description LIKE ?)";
+                    $sql_tidb .= " AND (name LIKE ? OR description LIKE ?)";
                     $search_term = "%" . escape_like_search($term) . "%";
-                    $params_d1[] = $search_term;
-                    $params_d1[] = $search_term;
+                    $params_tidb[] = $search_term;
+                    $params_tidb[] = $search_term;
                 }
 
-                $sql_d1 .= " ORDER BY updated_at DESC LIMIT ? OFFSET ?";
-                $params_d1[] = $limit;
-                $params_d1[] = $offset;
+                $sql_tidb .= " ORDER BY updated_at DESC LIMIT $limit OFFSET $offset";
+                $stmt_p = $pdo->prepare($sql_tidb);
+                $stmt_p->execute($params_tidb);
+                $tidb_products = $stmt_p->fetchAll(PDO::FETCH_ASSOC);
 
-                $d1_products = d1_request($sql_d1, $params_d1);
-                if (is_array($d1_products)) {
-                    foreach($d1_products as $p) {
+                if (is_array($tidb_products)) {
+                    foreach($tidb_products as $p) {
                         $p['options'] = json_decode($p['options'] ?? '[]', true);
                         if ($user_role === 'delivery') unset($p['cost_price']);
                         $merged_products[] = $p;
@@ -3852,10 +3935,10 @@ $ch = curl_init($fb_url . "stores/" . $merchant_username . ".json?auth=" . $fb_s
                     }
                 }
             } catch (Exception $e) {
-                // تجاوز الخطأ في حال تعذر الاتصال بـ D1
+                // تجاوز الخطأ لضمان تواصل العمل
             }
 
-            // 2. الدعم العكسي (Legacy MySQL) للمنتجات التي لم تهاجر بعد للنظام الجديد
+            // 2. الدعم العكسي للمنتجات التي ما زالت مخزنة بنمط Listings
             try {
                 $sql_mysql = "
                     SELECT p.id as global_product_id, p.name, p.mainDescription as description, p.image, p.sizes as options, p.discount,
@@ -3882,7 +3965,7 @@ $ch = curl_init($fb_url . "stores/" . $merchant_username . ".json?auth=" . $fb_s
                 foreach($legacy_products as $p) {
                     $pid = (string)$p['global_product_id'];
                     if (!in_array($pid, $seen_ids)) {
-                        $p['id'] = $pid; // توحيد الـ ID
+                        $p['id'] = $pid; 
                         $p['options'] = json_decode($p['options'] ?? '[]', true);
                         if ($user_role === 'delivery') unset($p['cost_price']);
                         $merged_products[] = $p;
@@ -3891,25 +3974,25 @@ $ch = curl_init($fb_url . "stores/" . $merchant_username . ".json?auth=" . $fb_s
                 }
             } catch (Exception $e) {}
 
-            // ترتيب زمني للنتائج المدمجة (الأحدث أولاً)
+            // ترتيب زمني للنتائج المدمجة
             usort($merged_products, function($a, $b) {
                 $timeA = isset($a['updated_at']) && is_numeric($a['updated_at']) ? $a['updated_at'] : 0;
                 $timeB = isset($b['updated_at']) && is_numeric($b['updated_at']) ? $b['updated_at'] : 0;
                 return $timeB - $timeA;
             });
 
-            // قص المصفوفة للتأكد من عدم تجاوز العدد المطلوب في الدفعة
             $final_products = array_slice($merged_products, 0, $limit);
             $has_more = count($final_products) >= $limit;
 
             send_response('success',['data' => $final_products, 'has_more' => $has_more, 'page' => $page]);
             break;
+
         case 'get_product':
             if (!$user_id) send_response('error',['message' => 'غير مصرح'], 401);
             
             $sql = "SELECT p.*, c.name as type FROM products p LEFT JOIN categories c ON p.category_id = c.id WHERE p.id = ?"; 
             $params =[sanitize_input($input['id'])];
-            if ($user_role === 'merchant' || $user_role === 'delivery') { $sql .= " AND p.user_id = ?"; $params[] = $user_id; }
+            if ($user_role === 'merchant' || $user_role === 'delivery') { $sql .= " AND p.merchant_id = ?"; $params[] = $user_id; }
             $stmt = $pdo->prepare($sql); $stmt->execute($params); $prod = $stmt->fetch(PDO::FETCH_ASSOC);
             if ($prod) {
                 $catPaths = get_full_category_paths($pdo);
@@ -3919,14 +4002,21 @@ $ch = curl_init($fb_url . "stores/" . $merchant_username . ".json?auth=" . $fb_s
 
                 if ($user_role === 'delivery') unset($prod['cost_price']);
                 
-                $options_data = json_decode($prod['sizes'] ?? '[]', true); if (is_array($options_data)) { foreach($options_data as &$opt) { if (isset($opt['size_name']) && !isset($opt['name'])) { $opt['name'] = $opt['size_name']; unset($opt['size_name']); } } }
-                $prod['options'] = $options_data; unset($prod['sizes']);
+                $options_data = json_decode($prod['options'] ?? '[]', true); 
+                if (is_array($options_data)) { 
+                    foreach($options_data as &$opt) { 
+                        if (isset($opt['size_name']) && !isset($opt['name'])) { 
+                            $opt['name'] = $opt['size_name']; 
+                            unset($opt['size_name']); 
+                        } 
+                    } 
+                }
+                $prod['options'] = $options_data;
                 send_response('success',['data' => $prod]);
             }
             throw new Exception('المنتج غير موجود.');
             break;
 
-        
         case 'review_product':
             if ($user_role !== 'admin') throw new Exception("غير مصرح. هذه الصلاحية للإدارة فقط.");
             
@@ -3947,13 +4037,10 @@ $ch = curl_init($fb_url . "stores/" . $merchant_username . ".json?auth=" . $fb_s
             }
             
             flag_cache_for_rebuild($user_id ?? null);
-            if ($user_role === 'merchant') { 
-                flag_cache_for_rebuild($user_id ?? null); 
-            }
             send_response('success',['message' => 'تم تحديث حالة مراجعة المنتج بنجاح.']);
             break;
 
- case 'delete_product':
+        case 'delete_product':
             if (!$user_id || $user_role !== 'merchant') send_response('error', ['message' => 'غير مصرح لك.'], 401);
             $product_id = sanitize_input($input['id']);
             $merchant_username = $_SESSION['username'] ?? get_username_by_id($pdo, $user_id);
@@ -3967,10 +4054,11 @@ $ch = curl_init($fb_url . "stores/" . $merchant_username . ".json?auth=" . $fb_s
                 throw new Exception("لا يمكنك حذف هذا المنتج حالياً لأنه موجود ضمن طلب نشط للزبائن. قم بإنهاء الطلب أو إلغائه أولاً.");
             }
 
-            // 2. الحذف من قاعدة بيانات D1 مباشرة
-            d1_request("DELETE FROM products WHERE id = ? AND merchant_id = ?", [$product_id, $user_id]);
+            // 2. الحذف من قاعدة بيانات TiDB مباشرة
+            $stmt_del = $pdo->prepare("DELETE FROM products WHERE id = ? AND merchant_id = ?");
+            $stmt_del->execute([$product_id, $user_id]);
 
-            // 🚀 3. النظام الجديد: تحديث الكاش السحابي فوراً
+            // 🚀 3. تحديث الكاش السحابي فوراً
             trigger_cache_rebuild($user_id, $merchant_username);
             
             // 4. الحذف من Firebase إن وجد
@@ -3978,23 +4066,25 @@ $ch = curl_init($fb_url . "stores/" . $merchant_username . ".json?auth=" . $fb_s
             
             send_response('success',['message' => 'تم حذف المنتج نهائياً بنجاح.']);
             break;
-    case 'toggle_availability':
+
+        case 'toggle_availability':
             if (!$user_id || $user_role !== 'merchant') send_response('error',['message' => 'غير مصرح'], 401);
             
             $product_id = sanitize_input($input['id']);
             $req_status = (int)$input['isAvailable'] ? 1 : 0;
             $merchant_username = $_SESSION['username'] ?? get_username_by_id($pdo, $user_id);
 
-            // 1. تحديث الحالة في D1 بأمان
-            d1_request("UPDATE products SET is_available = ?, updated_at = ? WHERE id = ? AND merchant_id = ?", 
-                      [$req_status, time(), $product_id, $user_id]);
+            // 1. تحديث الحالة في TiDB Cloud بأمان
+            $stmt_toggle = $pdo->prepare("UPDATE products SET is_available = ?, updated_at = ? WHERE id = ? AND merchant_id = ?");
+            $stmt_toggle->execute([$req_status, time(), $product_id, $user_id]);
 
-            // 🚀 2. النظام الجديد: تحديث الكاش السحابي فوراً
+            // 🚀 2. تحديث الكاش السحابي فوراً
             trigger_cache_rebuild($user_id, $merchant_username);
        
             send_response('success',['message' => 'تم تحديث حالة عرض المنتج (إخفاء/إظهار) بنجاح.']);
             break;
-         case 'add_quantity':
+
+        case 'add_quantity':
             if (!$user_id || $user_role !== 'merchant') send_response('error',['message' => 'غير مصرح لك.'], 401);
             
             $product_id = sanitize_input($input['productId']);
@@ -4007,8 +4097,11 @@ $ch = curl_init($fb_url . "stores/" . $merchant_username . ".json?auth=" . $fb_s
             
             $merchant_username = $_SESSION['username'] ?? get_username_by_id($pdo, $user_id);
 
-            // 1. سحب بيانات المنتج من D1 لضمان البيانات الحقيقية
-            $d1_products = d1_request("SELECT quantity, quantity_type, options FROM products WHERE id = ? AND merchant_id = ?", [$product_id, $user_id]);
+            // 1. سحب بيانات المنتج من TiDB لضمان البيانات الحقيقية
+            $stmt_p = $pdo->prepare("SELECT quantity, quantity_type, options FROM products WHERE id = ? AND merchant_id = ?");
+            $stmt_p->execute([$product_id, $user_id]);
+            $d1_products = $stmt_p->fetchAll(PDO::FETCH_ASSOC);
+
             if (empty($d1_products)) {
                 throw new Exception("المنتج غير موجود أو لا تملك صلاحية التعديل عليه.");
             }
@@ -4037,16 +4130,16 @@ $ch = curl_init($fb_url . "stores/" . $merchant_username . ".json?auth=" . $fb_s
                 
                 $new_options_json = json_encode($options, JSON_UNESCAPED_UNICODE);
                 
-                // تحديث D1 بالمقاسات الجديدة
-                d1_request("UPDATE products SET quantity = ?, options = ?, updated_at = ? WHERE id = ? AND merchant_id = ?", 
-                           [$new_total_qty, $new_options_json, time(), $product_id, $user_id]);
+                // تحديث TiDB بالمقاسات الجديدة
+                $stmt_upd = $pdo->prepare("UPDATE products SET quantity = ?, options = ?, updated_at = ? WHERE id = ? AND merchant_id = ?");
+                $stmt_upd->execute([$new_total_qty, $new_options_json, time(), $product_id, $user_id]);
             } else {
                 // منتج عادي لا يحتوي خيارات
-                d1_request("UPDATE products SET quantity = quantity + ?, updated_at = ? WHERE id = ? AND merchant_id = ?", 
-                           [$qty_to_add, time(), $product_id, $user_id]);
+                $stmt_upd = $pdo->prepare("UPDATE products SET quantity = quantity + ?, updated_at = ? WHERE id = ? AND merchant_id = ?");
+                $stmt_upd->execute([$qty_to_add, time(), $product_id, $user_id]);
             }
 
-            // 🚀 3. النظام الجديد: أمر بناء الكاش
+            // 🚀 3. أمر بناء الكاش
             trigger_cache_rebuild($user_id, $merchant_username);
                                   
             send_response('success',['message' => 'تمت إضافة الكمية للمخزون بنجاح ✅']);
@@ -4061,8 +4154,11 @@ $ch = curl_init($fb_url . "stores/" . $merchant_username . ".json?auth=" . $fb_s
             
             if ($qty_to_sell <= 0) throw new Exception("الكمية غير صالحة.");
 
-            // 1. جلب بيانات المنتج من D1 (السعر والتكلفة الحقيقية من الداتا بيز)
-            $product_res = d1_request("SELECT * FROM products WHERE id = ? AND merchant_id = ?", [$pid, $user_id]);
+            // 1. جلب بيانات المنتج من TiDB بأمان
+            $stmt_sel = $pdo->prepare("SELECT * FROM products WHERE id = ? AND merchant_id = ?");
+            $stmt_sel->execute([$pid, $user_id]);
+            $product_res = $stmt_sel->fetchAll(PDO::FETCH_ASSOC);
+
             if (empty($product_res)) throw new Exception("المنتج غير موجود أو لا تملكه.");
             $product = $product_res[0];
 
@@ -4083,24 +4179,24 @@ $ch = curl_init($fb_url . "stores/" . $merchant_username . ".json?auth=" . $fb_s
             $cost = ($product['cost_price']??0) * $qty_to_sell; 
             $sid = 'SALE-' . generate_uuid();
             
-            // 3. خصم الكمية من D1 بأمان (عملية ذرية Atomic)
+            // 3. خصم الكمية من TiDB بأمان (عملية ذرية)
             if ($product['quantity_type'] === 'tracked') {
-                d1_request("UPDATE products SET quantity = quantity - ? WHERE id = ? AND merchant_id = ? AND quantity >= ?", 
-                           [$qty_to_sell, $pid, $user_id, $qty_to_sell]);
+                $stmt_upd = $pdo->prepare("UPDATE products SET quantity = quantity - ? WHERE id = ? AND merchant_id = ? AND quantity >= ?");
+                $stmt_upd->execute([$qty_to_sell, $pid, $user_id, $qty_to_sell]);
             }
             
-            // 4. تسجيل المبيعات في D1
-            d1_request("INSERT INTO sales_log (id, user_id, product_id, size_id, quantity, price_per_item, total_price, currency, cost_at_sale) 
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", 
-                        [$sid, $user_id, $pid, $size_id, $qty_to_sell, $price, $total, $product['currency'], $cost]);
+            // 4. تسجيل المبيعات في TiDB
+            $stmt_ins = $pdo->prepare("INSERT INTO sales_log (id, user_id, product_id, size_id, quantity, price_per_item, total_price, currency, cost_at_sale) 
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
+            $stmt_ins->execute([$sid, $user_id, $pid, $size_id, $qty_to_sell, $price, $total, $product['currency'], $cost]);
             
-            send_response('success',['message' => 'تمت العملية وتحديث المخزون في D1 بنجاح', 'saleId' => $sid]);
+            send_response('success',['message' => 'تمت العملية وتحديث المخزون بنجاح', 'saleId' => $sid]);
             break;
             
         case 'get_returnable_sales':
             if (!$user_id) send_response('error',['message' => 'غير مصرح'], 401);
             $term = sanitize_input($input['term'] ?? '');
-            $sql = "SELECT s.id, s.timestamp, p.name as productName, s.size_id, p.sizes, (s.quantity - IFNULL((SELECT SUM(quantity) FROM sales_log WHERE original_sale_id = s.id AND type = 'return'), 0)) as returnable_qty FROM sales_log s JOIN products p ON s.product_id = p.id WHERE s.type = 'sale' AND (s.quantity - IFNULL((SELECT SUM(quantity) FROM sales_log WHERE original_sale_id = s.id AND type = 'return'), 0)) > 0";
+            $sql = "SELECT s.id, s.timestamp, p.name as productName, s.size_id, p.options as sizes, (s.quantity - IFNULL((SELECT SUM(quantity) FROM sales_log WHERE original_sale_id = s.id AND type = 'return'), 0)) as returnable_qty FROM sales_log s JOIN products p ON s.product_id = p.id WHERE s.type = 'sale' AND (s.quantity - IFNULL((SELECT SUM(quantity) FROM sales_log WHERE original_sale_id = s.id AND type = 'return'), 0)) > 0";
             $params =[];
             if ($user_role === 'merchant' || $user_role === 'delivery') { $sql .= " AND s.user_id = ?"; $params[] = $user_id; }
             if ($term) { 
@@ -4111,7 +4207,20 @@ $ch = curl_init($fb_url . "stores/" . $merchant_username . ".json?auth=" . $fb_s
             }
             $sql .= " ORDER BY s.timestamp DESC LIMIT 50";
             $stmt = $pdo->prepare($sql); $stmt->execute($params); $sales = $stmt->fetchAll(PDO::FETCH_ASSOC);
-            foreach($sales as &$sale) { if ($sale['size_id'] && $sale['sizes']) { $options = json_decode($sale['sizes'], true); if (is_array($options)) { foreach($options as $option) { if (isset($option['id']) && $option['id'] === $sale['size_id']) { $sale['size_name'] = $option['name'] ?? ($option['size_name'] ?? ''); break; } } } } unset($sale['sizes']); }
+            foreach($sales as &$sale) { 
+                if ($sale['size_id'] && $sale['sizes']) { 
+                    $options = json_decode($sale['sizes'], true); 
+                    if (is_array($options)) { 
+                        foreach($options as $option) { 
+                            if (isset($option['id']) && $option['id'] === $sale['size_id']) { 
+                                $sale['size_name'] = $option['name'] ?? ($option['size_name'] ?? ''); 
+                                break; 
+                            } 
+                        } 
+                    } 
+                } 
+                unset($sale['sizes']); 
+            }
             send_response('success',['data' => $sales]);
             break;
 
@@ -4176,6 +4285,7 @@ $ch = curl_init($fb_url . "stores/" . $merchant_username . ".json?auth=" . $fb_s
             break;
 
         case 'merchant_approve_order':
+    
             if ($user_role !== 'merchant') throw new Exception("غير مصرح لك.");
             $order_id = sanitize_input($input['order_id']);
             
@@ -4184,18 +4294,9 @@ $ch = curl_init($fb_url . "stores/" . $merchant_username . ".json?auth=" . $fb_s
             $stmt->execute([$order_id, $user_id]);
             
             if ($stmt->rowCount() > 0) {
-                $get_order = $pdo->prepare("SELECT ticket_data, status FROM live_tickets WHERE ticket_id = ?");
-                $get_order->execute([$order_id]);
-                $o_data = $get_order->fetch(PDO::FETCH_ASSOC);
-                $fb_data = json_decode($o_data['ticket_data'], true);
-                $fb_data['id'] = $order_id;
-                $fb_data['status'] = $o_data['status'];
-                
-                // ⭐ تعديل أمني: استعلام مجهز لتأمين جلب اسم المستخدم للتاجر
+                // ⭐ تعديل أمني: إرسال إشارة تحديث بدلاً من البيانات الكاملة
                 $m_username = $_SESSION['username'] ?? get_username_by_id($pdo, $user_id);
-                $merchant_secret_hash = md5($user_id . APP_SECRET_KEY . 'orders');
-                
-                sync_to_firebase($m_username, "secure_active_orders/$merchant_secret_hash", $order_id, $fb_data, 'PUT');     
+                sync_to_firebase($m_username, "signals/orders_updated", null, time(), 'PUT');     
                 update_order_tracking($m_username, $order_id, 'confirmed_by_store');
                 
                 send_response('success', ['message' => 'تمت الموافقة على الطلب وجاري تجهيزه.']);
@@ -4221,20 +4322,10 @@ $ch = curl_init($fb_url . "stores/" . $merchant_username . ".json?auth=" . $fb_s
             
             if ($stmt->rowCount() > 0) {
                 $get_order = $pdo->prepare("SELECT ticket_data FROM live_tickets WHERE ticket_id = ?");
-                $get_order->execute([$order_id]);
-                $o_data = $get_order->fetch(PDO::FETCH_ASSOC);
-                if($o_data) {
-                    $fb_data = json_decode($o_data['ticket_data'], true);
-                    $fb_data['id'] = $order_id;
-                    $fb_data['status'] = $new_status;
-                    
-                    // ⭐ تعديل أمني: استعلام مجهز لتأمين جلب اسم المستخدم للتاجر
-                    $m_username = $_SESSION['username'] ?? get_username_by_id($pdo, $user_id);
-                    $merchant_secret_hash = md5($user_id . APP_SECRET_KEY . 'orders');
-                    
-                    sync_to_firebase($m_username, "secure_active_orders/$merchant_secret_hash", $order_id, $fb_data, 'PUT');
-                    update_order_tracking($m_username, $order_id, $new_status);
-                }
+                $m_username = $_SESSION['username'] ?? get_username_by_id($pdo, $user_id);
+                // تحديث جرس الإشعارات فقط
+                sync_to_firebase($m_username, "signals/orders_updated", null, time(), 'PUT');
+                update_order_tracking($m_username, $order_id, $new_status);
                 send_response('success',['message' => 'تم تحديث حالة الطلب بنجاح.']);
             }
             else throw new Exception("فشل تحديث الحالة.");
@@ -4278,15 +4369,9 @@ $ch = curl_init($fb_url . "stores/" . $merchant_username . ".json?auth=" . $fb_s
                 
                 $pdo->commit();
 
-                $ticket_data['id'] = $ticket_id;
-                $ticket_data['status'] = 'completed';
-                
-                // ⭐ تعديل أمني: استعلام مجهز لتأمين جلب اسم المستخدم للتاجر
                 $m_username = $_SESSION['username'] ?? get_username_by_id($pdo, $user_id);
-                $merchant_secret_hash = md5($user_id . APP_SECRET_KEY . 'orders');
-                
-                sync_to_firebase($m_username, "secure_archived_orders/$merchant_secret_hash", $ticket_id, $ticket_data, 'PUT');
-                sync_to_firebase($m_username, "secure_active_orders/$merchant_secret_hash", $ticket_id, null, 'DELETE');
+                // إرسال إشارة للمتصفح بجلب البيانات المحدثة
+                sync_to_firebase($m_username, "signals/orders_updated", null, time(), 'PUT');
                 update_order_tracking($m_username, $ticket_id, 'completed');
                 
                 send_response('success',['message' => 'تم تأكيد التسليم بنجاح وتوثيق الأرباح في رصيدك!']);
@@ -4501,7 +4586,7 @@ $ch = curl_init($fb_url . "stores/" . $merchant_username . ".json?auth=" . $fb_s
 
         case 'get_merchants':
             if ($user_role !== 'admin') throw new Exception("للمدير فقط");
-            $sql = "SELECT u.id, u.username, u.store_name, u.phone, u.created_at, u.is_active, u.settings, (SELECT COUNT(*) FROM products WHERE products.user_id = u.id) as product_count FROM users u WHERE u.role IN ('merchant', 'delivery') ORDER BY u.created_at DESC";
+            $sql = "SELECT u.id, u.username, u.store_name, u.phone, u.created_at, u.is_active, u.settings, (SELECT COUNT(*) FROM products WHERE products.merchant_id = u.id) as product_count FROM users u WHERE u.role IN ('merchant', 'delivery') ORDER BY u.created_at DESC";
             $stmt = $pdo->query($sql);
             send_response('success',['data' => $stmt->fetchAll(PDO::FETCH_ASSOC)]);
             break;
@@ -4596,7 +4681,7 @@ $ch = curl_init($fb_url . "stores/" . $merchant_username . ".json?auth=" . $fb_s
             $merchant_id = sanitize_input($input['id']);
             try {
                 $pdo->beginTransaction();
-                $pdo->prepare("UPDATE products SET user_id = NULL WHERE user_id = ?")->execute([$merchant_id]);
+                $pdo->prepare("UPDATE products SET merchant_id = NULL WHERE merchant_id = ?")->execute([$merchant_id]);
                 $pdo->prepare("DELETE FROM trusted_devices WHERE user_id = ?")->execute([$merchant_id]);
                 $pdo->prepare("DELETE FROM users WHERE id = ? AND role != 'admin'")->execute([$merchant_id]);
                 $pdo->commit(); send_response('success',['message' => 'تم حذف المستخدم وإلغاء ربط منتجاته']);
@@ -4607,19 +4692,31 @@ $ch = curl_init($fb_url . "stores/" . $merchant_username . ".json?auth=" . $fb_s
             if (!$user_id || !in_array($user_role, ['merchant', 'delivery'])) {
                 send_response('error', ['message' => 'غير مصرح لك بالوصول'], 401);
             }
-            
-            $stmt = $pdo->prepare("SELECT id, username, store_name, phone, store_type, settings FROM users WHERE id = ?");
+            // ✅ إصلاح: جلب بيانات شاملة تشمل بيانات التسجيل الأولي
+            $stmt = $pdo->prepare("SELECT id, username, store_name, phone, store_type, settings, created_at FROM users WHERE id = ?");
             $stmt->execute([$user_id]);
             $merchantData = $stmt->fetch(PDO::FETCH_ASSOC);
             
             if ($merchantData) {
-                $merchantData['settings'] = json_decode($merchantData['settings'] ?: '{}', true);
+                // ✅ فك تشفير settings مع ضمان القيمة الافتراضية
+                if (!empty($merchantData['settings'])) {
+                    $decoded = json_decode($merchantData['settings'], true);
+                    $merchantData['settings'] = is_array($decoded) ? $decoded : [];
+                } else {
+                    $merchantData['settings'] = [];
+                }
+                
+                // ✅ إرجاع علم is_first_login ليعرف الفرونت أنه تسجيل أول
+                $merchantData['is_first_login'] = empty($merchantData['store_name']) || $merchantData['store_name'] === $merchantData['username'];
+                
+                // ✅ حساب طابع زمني للكاش ليعرف الفرونت متى يجدد
+                $merchantData['data_fetched_at'] = time();
+                
                 send_response('success', ['data' => $merchantData]);
             } else {
                 throw new Exception("لم يتم العثور على بيانات الحساب.");
             }
-            break;    
-
+            break;
         case 'merchant_cancel_order':
             if ($user_role !== 'merchant') throw new Exception("غير مصرح لك.");
             $order_id = sanitize_input($input['order_id']);
@@ -4644,7 +4741,7 @@ $ch = curl_init($fb_url . "stores/" . $merchant_username . ".json?auth=" . $fb_s
                 $grand_total = $ticket_data['financials']['grand_total'] ?? 0;
                 $archive_stmt->execute([$order_id, $ticket['customer_id'], $user_id, $grand_total, json_encode($ticket_data, JSON_UNESCAPED_UNICODE)]);
 
-                // 1. استرجاع الكميات إلى قاعدة بيانات D1
+                // 1. استرجاع الكميات إلى قاعدة بيانات TiDB Cloud (PDO) مباشرة
                 $items = $ticket_data['items'] ?? [];
                 $inventory_changed = false;
 
@@ -4653,14 +4750,16 @@ $ch = curl_init($fb_url . "stores/" . $merchant_username . ".json?auth=" . $fb_s
                     $qty = (int)$item['quantity'];
                     $size_id = $item['size_id'] ?? null;
                     
-                    // جلب المنتج من D1 للتأكد من نوع الكمية
-                    $d1_prod = d1_request("SELECT quantity_type, options FROM products WHERE id = ? AND merchant_id = ?", [$pid, $user_id]);
+                    // جلب المنتج من TiDB للتأكد من نوع الكمية وصحتها
+                    $stmt_prod_check = $pdo->prepare("SELECT quantity_type, options FROM products WHERE id = ? AND merchant_id = ?");
+                    $stmt_prod_check->execute([$pid, $user_id]);
+                    $db_prod = $stmt_prod_check->fetch(PDO::FETCH_ASSOC);
                     
-                    if (!empty($d1_prod) && $d1_prod[0]['quantity_type'] === 'tracked') {
+                    if ($db_prod && $db_prod['quantity_type'] === 'tracked') {
                         $inventory_changed = true;
 
                         if (!empty($size_id)) {
-                            $options_array = json_decode($d1_prod[0]['options'] ?: '[]', true);
+                            $options_array = json_decode($db_prod['options'] ?: '[]', true);
                             $total_remaining_qty = 0;
                             
                             foreach ($options_array as &$opt) {
@@ -4671,11 +4770,11 @@ $ch = curl_init($fb_url . "stores/" . $merchant_username . ".json?auth=" . $fb_s
                             }
                             unset($opt);
                             
-                            d1_request("UPDATE products SET quantity = ?, options = ?, updated_at = ? WHERE id = ? AND merchant_id = ?",
-                                      [$total_remaining_qty, json_encode($options_array, JSON_UNESCAPED_UNICODE), time(), $pid, $user_id]);
+                            $stmt_upd_prod = $pdo->prepare("UPDATE products SET quantity = ?, options = ?, updated_at = ? WHERE id = ? AND merchant_id = ?");
+                            $stmt_upd_prod->execute([$total_remaining_qty, json_encode($options_array, JSON_UNESCAPED_UNICODE), time(), $pid, $user_id]);
                         } else {
-                            d1_request("UPDATE products SET quantity = quantity + ?, updated_at = ? WHERE id = ? AND merchant_id = ?",
-                                      [$qty, time(), $pid, $user_id]);
+                            $stmt_upd_prod = $pdo->prepare("UPDATE products SET quantity = quantity + ?, updated_at = ? WHERE id = ? AND merchant_id = ?");
+                            $stmt_upd_prod->execute([$qty, time(), $pid, $user_id]);
                         }
                     }
                 }
@@ -4683,15 +4782,13 @@ $ch = curl_init($fb_url . "stores/" . $merchant_username . ".json?auth=" . $fb_s
                 $pdo->prepare("DELETE FROM live_tickets WHERE ticket_id = ?")->execute([$order_id]);
                 $pdo->commit();
 
-                // 🚀 2. النظام الجديد: إذا رجعنا كميات للمخزون، نأمر الـ Worker بتحديث الكاش
+                // 🚀 2. تحديث الكاش السحابي تلقائياً بعد استرجاع المخزون
                 if ($inventory_changed) {
                     trigger_cache_rebuild($user_id, $merchant_username);
                 }
 
-                // 3. مزامنة حالة الطلب مع Firebase
-                $merchant_secret_hash = md5($user_id . APP_SECRET_KEY . 'orders');
-                sync_to_firebase($merchant_username, "secure_archived_orders/$merchant_secret_hash", $order_id, $ticket_data, 'PUT');
-                sync_to_firebase($merchant_username, "secure_active_orders/$merchant_secret_hash", $order_id, null, 'DELETE');
+        // 3. إرسال إشارة تنبيه للمتصفح لتحديث الواجهة عبر الـ API
+                sync_to_firebase($merchant_username, "signals/orders_updated", null, time(), 'PUT');
                 update_order_tracking($merchant_username, $order_id, 'cancelled');
 
                 send_response('success', ['message' => 'تم إلغاء الطلب بنجاح وإعادة المنتجات للمخزون.']);
@@ -4752,7 +4849,7 @@ $ch = curl_init($fb_url . "stores/" . $merchant_username . ".json?auth=" . $fb_s
             ];
             $json_settings = json_encode($final_settings, JSON_UNESCAPED_UNICODE);
             
-            // استدعاء الدالة الجديدة لتوليد info.json ورفعه مع المانيفست
+            // استدعاء الدالة لتوليد ملف info.json ورفعه مع المانيفست
             // 1. أولاً: نقوم بتحديث قاعدة البيانات بالبيانات الجديدة
             $stmt_update->execute([
                 $storeName, 
@@ -4811,14 +4908,14 @@ $ch = curl_init($fb_url . "stores/" . $merchant_username . ".json?auth=" . $fb_s
 
             $total_earnings =[]; $commission_rate = 0.80; 
             foreach($raw_earnings as $currency => $total_fee) { $total_earnings[$currency] = $total_fee * $commission_rate; }
-$completed_stmt = $pdo->prepare("SELECT COUNT(*) FROM orders WHERE delivery_agent_id = ? AND status = 'completed'");
+            $completed_stmt = $pdo->prepare("SELECT COUNT(*) FROM orders WHERE delivery_agent_id = ? AND status = 'completed'");
             $completed_stmt->execute([$user_id]);
             $total_completed = (int)$completed_stmt->fetchColumn();
 
             $daily_stmt = $pdo->prepare("SELECT DATE(created_at) as date, COUNT(*) as count FROM orders WHERE delivery_agent_id = ? AND status = 'completed' AND created_at >= CURDATE() - INTERVAL 7 DAY GROUP BY date ORDER BY date ASC");
             $daily_stmt->execute([$user_id]);
             
-            // ⭐ تصحيح أمني وبرمجي: استبدال المتغير $stmt المتسبب في خطأ بـ $daily_stmt الصحيح لجلب البيانات
+            // ⭐ تصحيح أمني وبرمجي: استبدال المتغير المتسبب في خطأ بـ $daily_stmt الصحيح لجلب البيانات
             $daily_stats = $daily_stmt->fetchAll(PDO::FETCH_ASSOC);
             
             send_response('success',[ 'data' =>[ 'total_completed' => $total_completed, 'total_earnings' => $total_earnings, 'daily_stats' => $daily_stats ] ]);
@@ -5002,13 +5099,13 @@ $completed_stmt = $pdo->prepare("SELECT COUNT(*) FROM orders WHERE delivery_agen
                     $items = $items_stmt->fetchAll(PDO::FETCH_ASSOC);
 
                     foreach ($items as $item) {
-                        $prod_stmt = $pdo->prepare("SELECT sizes, quantity_type FROM products WHERE id = ? FOR UPDATE");
+                        $prod_stmt = $pdo->prepare("SELECT options, quantity_type FROM products WHERE id = ? FOR UPDATE");
                         $prod_stmt->execute([$item['product_id']]);
                         $prod = $prod_stmt->fetch(PDO::FETCH_ASSOC);
 
                         if ($prod && $prod['quantity_type'] === 'tracked') {
-                            if ($item['size_id'] && $prod['sizes']) {
-                                $options = json_decode($prod['sizes'], true);
+                            if ($item['size_id'] && $prod['options']) {
+                                $options = json_decode($prod['options'], true);
                                 if (is_array($options)) {
                                     foreach ($options as &$option) {
                                         if (isset($option['id']) && $option['id'] === $item['size_id']) {
@@ -5018,7 +5115,7 @@ $completed_stmt = $pdo->prepare("SELECT COUNT(*) FROM orders WHERE delivery_agen
                                     }
                                 }
                                 $new_options_json = json_encode($options, JSON_UNESCAPED_UNICODE);
-                                $pdo->prepare("UPDATE products SET quantity = quantity + ?, sizes = ? WHERE id = ?")
+                                $pdo->prepare("UPDATE products SET quantity = quantity + ?, options = ? WHERE id = ?")
                                     ->execute([$item['quantity'], $new_options_json, $item['product_id']]);
                             } else {
                                 $pdo->prepare("UPDATE products SET quantity = quantity + ? WHERE id = ?")
