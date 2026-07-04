@@ -469,7 +469,46 @@ function send_silent_push_to_merchant($merchant_fcm_token, $order_id) {
     }
     curl_close($ch);
 }
+// =======================================================
+// 🚀 دالة تدمير الكاش في Cloudflare آلياً (Purge Cache)
+// =======================================================
+function purge_cloudflare_cache($urls_to_purge) {
+    // جلب المفاتيح من متغيرات البيئة (يجب إضافتها في Render)
+    $zone_id = getenv('CF_ZONE_ID') ?: $_ENV['CF_ZONE_ID'] ?? '';
+    $api_token = getenv('CF_API_TOKEN') ?: $_ENV['CF_API_TOKEN'] ?? '';
+    $domain = getenv('CF_DOMAIN') ?: $_ENV['CF_DOMAIN'] ?? 'https://nalsh.dpdns.org'; // رابط الـ Worker/النطاق الخاص بك
 
+    if (empty($zone_id) || empty($api_token) || empty($urls_to_purge)) return false;
+
+    // تحويل المسارات إلى روابط كاملة
+    $full_urls = array_map(function($path) use ($domain) {
+        return $domain . '/' . ltrim($path, '/');
+    }, $urls_to_purge);
+
+    $url = "https://api.cloudflare.com/client/v4/zones/{$zone_id}/purge_cache";
+    
+    $ch = curl_init($url);
+    curl_setopt($ch, CURLOPT_CUSTOMREQUEST, "POST");
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 3); // عدم تعطيل النظام إذا تأخر Cloudflare
+    curl_setopt($ch, CURLOPT_HTTPHEADER, [
+        "Authorization: Bearer {$api_token}",
+        "Content-Type: application/json"
+    ]);
+    
+    // Cloudflare يسمح بمسح 30 رابط في الطلب الواحد
+    curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode(['files' => $full_urls]));
+    
+    $response = curl_exec($ch);
+    $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+
+    if ($http_code >= 400) {
+        error_log("Cloudflare Purge Failed: " . $response);
+        return false;
+    }
+    return true;
+}
 function verify_signed_token($token, $expected_purpose) {
     if (empty($token)) throw new Exception("التذكرة مفقودة. تم رفض العملية لتأمين النظام.");
     $parts = explode('.', $token);
@@ -641,7 +680,17 @@ $stmt = $pdo->prepare("SELECT * FROM products WHERE merchant_id = ? AND is_avail
             ];
             sync_to_github("{$basePath}products_page_{$pageNum}.json", $pagePayload, 'PUT', "Rebuild page $pageNum v$timestamp");
         }
-
+$urls_to_purge = [
+            "{$basePath}manifest.json",
+            "{$basePath}search_index.json",
+            "{$basePath}categories.json",
+            "{$basePath}info.json"
+        ];
+        foreach ($pages as $pageNum => $pageData) {
+            $urls_to_purge[] = "{$basePath}products_page_{$pageNum}.json";
+        }
+        
+        purge_cloudflare_cache($urls_to_purge);
         return true;
     } catch (Exception $e) {
         error_log("Failed to rebuild cache for merchant $merchant_id: " . $e->getMessage());
