@@ -1,6 +1,6 @@
 <?php
 // =======================================================
-// ملف API الشامل (النسخة المتطورة أمنياً - الجدار الأمني 11.0)
+// ملف API الشامل (النسخة المتطورة أمنياً - الجدار الأمني 12.0)
 // ⭐ تم التحديث لدعم نظام المتاجر المتعددة (Multi-Vendor) ⭐
 // ⭐ التحديث الجديد: 
 // 1. دعم المزامنة اللحظية للمنتجات بدون تحديث الصفحة.
@@ -8,7 +8,10 @@
 // 3. منع تجهيز الطلبات حتى يتم قبولها من قبل مندوب.
 // 4. حماية كاملة ومطلقة ضد ثغرات SQL Injection باستخدام الاستعلامات المجهزة.
 // 5. تم إلغاء الاعتماد على Cloudflare D1 بالكامل وتحويل كافة العمليات إلى TiDB Cloud (PDO).
-// 6. الحفاظ على المزامنة السحابية اللحظية للمنتجات إلى Cloudflare KV و GitHub.
+// 6. ⭐ تم إلغاء Cloudflare KV بالكامل - جميع ملفات JSON تُرفع مباشرة إلى GitHub API.
+//    ✅ كل ملف يُرفع بتوقيع HMAC-SHA256 في رسالة الـ Commit للتحقق من سلامة البيانات.
+//    ✅ بنية المسارات منظمة: stores/{username}/manifest.json, search_index.json, ...
+//    ✅ لا اعتماد على أي خدمة وسيطة - GitHub هو المصدر الوحيد للحقيقة (Single Source of Truth).
 // المسار: htdocs/public_html/api.php
 // =======================================================
 
@@ -261,104 +264,156 @@ function fb_request($path, $method = 'GET', $data = null) {
 }
 
 // =======================================================
-// 🚀 نظام المزامنة الفائقة مع Cloudflare KV Storage
+// 🚀 نظام المزامنة الآمنة والمباشرة مع GitHub API
+// ✅ بديل Cloudflare KV - جميع العمليات تمر عبر GitHub فقط
+// ✅ كل commit يحمل توقيع HMAC-SHA256 للتحقق من سلامة البيانات
+// ✅ GET يجلب الملف من raw.githubusercontent.com (سريع + مجاني)
+// ✅ PUT/DELETE يستخدم GitHub Contents API (مصادقة Bearer Token)
 // =======================================================
-function kv_request($path, $method = 'GET', $data = null) {
-    $kv_url = getenv('WORKER_CDN_URL') ?: getenv('WORKER_D1_URL') ?: $_SERVER['WORKER_CDN_URL'] ?? 'https://ny.nasermsasalsh.workers.dev/';
-    if (substr($kv_url, -1) !== '/') $kv_url .= '/';
-    
-    $kv_secret = getenv('WORKER_SECRET') ?: $_SERVER['WORKER_SECRET'] ?? ''; 
-    
-    $path = str_replace('.json', '', $path);
-    $url = $kv_url . ltrim($path, '/');
-    
-    $ch = curl_init($url);
-    curl_setopt($ch, CURLOPT_CUSTOMREQUEST, $method);
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true);
-    curl_setopt($ch, CURLOPT_TIMEOUT, 6); 
-    
-    $headers = ['Content-Type: application/json'];
-    
-    if ($method !== 'GET') {
-        if (empty($kv_secret)) throw new Exception("حماية النظام: مفتاح التخزين مفقود من إعدادات Render.");
-        $headers[] = 'Authorization: Bearer ' . $kv_secret;
-    }
-    
-    curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
-    if ($data !== null) {
-        curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data, JSON_UNESCAPED_UNICODE));
-    }
-    
-    $response = curl_exec($ch);
-    $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    curl_close($ch);
-    
-    if ($http_code == 401 || $http_code == 403) {
-        throw new Exception("تم رفض الوصول إلى Cloudflare (الرقم السري WORKER_SECRET غير متطابق).");
-    } elseif ($http_code >= 500) {
-        throw new Exception("حدث خطأ داخل سيرفر التخزين (Cloudflare Worker 500 Error). تأكد من ربط STORE_KV.");
-    } elseif ($http_code == 404) {
-        throw new Exception("المسار غير موجود في Worker Cloudflare (404 Error).");
-    }
-    
-    return json_decode($response, true);
+function gh_get_credentials() {
+    $token = getenv('GITHUB_TOKEN') ?: ($_ENV['GITHUB_TOKEN'] ?? '');
+    $owner = getenv('GITHUB_REPO_OWNER') ?: ($_ENV['GITHUB_REPO_OWNER'] ?? '');
+    $repo  = getenv('GITHUB_REPO_NAME')  ?: ($_ENV['GITHUB_REPO_NAME']  ?? '');
+    return [$token, $owner, $repo];
 }
-// =======================================================
-// 🚀 نظام المزامنة الآمنة والسريعة مع GitHub API (مستودع JSON)
-// =======================================================
-function sync_to_github($path, $data, $method = 'PUT', $commit_message = "Auto-update from system") {
-    // جلب المفاتيح بأمان من Render
-    $gh_token = getenv('GITHUB_TOKEN') ?: $_ENV['GITHUB_TOKEN'] ?? '';
-    $gh_owner = getenv('GITHUB_REPO_OWNER') ?: $_ENV['GITHUB_REPO_OWNER'] ?? '';
-    $gh_repo  = getenv('GITHUB_REPO_NAME') ?: $_ENV['GITHUB_REPO_NAME'] ?? '';
 
-    // إيقاف الدالة بصمت إذا لم يتم إعداد المفاتيح (لحماية النظام من التوقف)
-    if (empty($gh_token) || empty($gh_owner) || empty($gh_repo)) return;
+/**
+ * kv_request — واجهة متوافقة مع الكود القديم لكنها تعمل على GitHub مباشرة.
+ * 
+ * GET  → يجلب الملف من raw.githubusercontent.com (أسرع + لا تحتاج token للقراءة)
+ * PUT  → يرفع/يحدّث الملف عبر GitHub Contents API مع توقيع HMAC في رسالة الـ Commit
+ * DELETE → يحذف الملف عبر GitHub Contents API
+ *
+ * @param string $path   المسار النسبي مثل: stores/username/products_page_1
+ * @param string $method GET | PUT | DELETE
+ * @param mixed  $data   البيانات للرفع (مصفوفة أو null)
+ * @return array|null    البيانات عند GET، أو null عند PUT/DELETE
+ */
+function kv_request($path, $method = 'GET', $data = null) {
+    [$gh_token, $gh_owner, $gh_repo] = gh_get_credentials();
 
-    $url = "https://api.github.com/repos/{$gh_owner}/{$gh_repo}/contents/" . ltrim($path, '/');
-    $headers = [
+    if (empty($gh_owner) || empty($gh_repo)) {
+        error_log("GitHub KV: GITHUB_REPO_OWNER أو GITHUB_REPO_NAME مفقود.");
+        return null;
+    }
+
+    // ✅ تنظيف المسار: إزالة .json إذا أُضيفت عن طريق الخطأ
+    $clean_path = ltrim(str_replace('.json', '', $path), '/') . '.json';
+    $api_url    = "https://api.github.com/repos/{$gh_owner}/{$gh_repo}/contents/{$clean_path}";
+
+    $base_headers = [
         "Authorization: Bearer {$gh_token}",
         "Accept: application/vnd.github+json",
-        "User-Agent: Nalsh-Ecom-System/1.0",
-        "X-GitHub-Api-Version: 2022-11-28"
+        "User-Agent: Nalsh-Ecom-System/2.0",
+        "X-GitHub-Api-Version: 2022-11-28",
+        "Content-Type: application/json",
     ];
 
-    // 1. جلب الـ SHA الخاص بالملف (مطلوب أساسي في GitHub لتحديث ملف موجود)
-    $ch = curl_init($url);
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
-    curl_setopt($ch, CURLOPT_TIMEOUT, 2); // ثانيتين كحد أقصى حتى لا يعلق النظام
-    $response = curl_exec($ch);
-    $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    // ──────────────────────────────────────────────
+    // GET: جلب الملف من raw.githubusercontent.com (أسرع وبدون token)
+    // ──────────────────────────────────────────────
+    if ($method === 'GET') {
+        $raw_url = "https://raw.githubusercontent.com/{$gh_owner}/{$gh_repo}/main/{$clean_path}";
+        $ch = curl_init($raw_url);
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_SSL_VERIFYPEER => true,
+            CURLOPT_TIMEOUT        => 5,
+            CURLOPT_HTTPHEADER     => ["User-Agent: Nalsh-Ecom-System/2.0"],
+        ]);
+        $response  = curl_exec($ch);
+        $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+
+        if ($http_code === 200 && $response) {
+            return json_decode($response, true);
+        }
+        return null;
+    }
+
+    // ──────────────────────────────────────────────
+    // PUT / DELETE: يحتاج GitHub Token
+    // ──────────────────────────────────────────────
+    if (empty($gh_token)) {
+        error_log("GitHub KV: GITHUB_TOKEN مفقود - تعذّر تنفيذ {$method} على {$clean_path}");
+        return null;
+    }
+
+    // 1. جلب SHA الملف الحالي (مطلوب لأي تحديث أو حذف)
+    $ch = curl_init($api_url);
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_HTTPHEADER     => $base_headers,
+        CURLOPT_TIMEOUT        => 4,
+    ]);
+    $info_resp = curl_exec($ch);
+    $info_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
     curl_close($ch);
 
     $sha = null;
-    if ($http_code == 200) {
-        $file_info = json_decode($response, true);
-        $sha = $file_info['sha'] ?? null;
+    if ($info_code === 200) {
+        $file_meta = json_decode($info_resp, true);
+        $sha = $file_meta['sha'] ?? null;
     }
 
-    if ($method === 'DELETE' && !$sha) return; // لا حاجة للحذف إذا لم يكن الملف موجوداً
+    // DELETE: نحتاج SHA لأي عملية حذف
+    if ($method === 'DELETE') {
+        if (!$sha) return null; // الملف غير موجود أصلاً
+        $payload = [
+            "message" => "🗑️ Auto-delete: {$clean_path}",
+            "sha"     => $sha,
+        ];
+        $ch2 = curl_init($api_url);
+        curl_setopt_array($ch2, [
+            CURLOPT_CUSTOMREQUEST => 'DELETE',
+            CURLOPT_POSTFIELDS    => json_encode($payload),
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_HTTPHEADER    => $base_headers,
+            CURLOPT_TIMEOUT       => 8,
+        ]);
+        curl_exec($ch2);
+        curl_close($ch2);
+        return null;
+    }
 
-    // 2. تجهيز البيانات والتشفير
-    $payload = ["message" => $commit_message];
+    // PUT: رفع/تحديث الملف مع توقيع HMAC لضمان سلامة البيانات
+    $json_content  = json_encode($data, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+    $secret_key    = getenv('APP_SECRET_KEY') ?: ($_ENV['APP_SECRET_KEY'] ?? 'default_key');
+    $data_signature = hash_hmac('sha256', $json_content, $secret_key);
+    $timestamp      = date('Y-m-d H:i:s T');
+
+    $payload = [
+        "message" => "⚡ Auto-sync [{$clean_path}] | sig:{$data_signature} | {$timestamp}",
+        "content" => base64_encode($json_content),
+    ];
     if ($sha) $payload["sha"] = $sha;
-    
-    if ($method !== 'DELETE') {
-        $json_content = json_encode($data, JSON_UNESCAPED_UNICODE);
-        $payload["content"] = base64_encode($json_content); // GitHub يقبل Base64 فقط
+
+    $ch2 = curl_init($api_url);
+    curl_setopt_array($ch2, [
+        CURLOPT_CUSTOMREQUEST  => 'PUT',
+        CURLOPT_POSTFIELDS     => json_encode($payload),
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_HTTPHEADER     => $base_headers,
+        CURLOPT_TIMEOUT        => 10,
+    ]);
+    $put_resp = curl_exec($ch2);
+    $put_code = curl_getinfo($ch2, CURLINFO_HTTP_CODE);
+    curl_close($ch2);
+
+    if ($put_code >= 400) {
+        error_log("GitHub KV PUT فشل [{$put_code}] على {$clean_path}: {$put_resp}");
     }
 
-    // 3. إرسال التحديث إلى GitHub
-    $ch2 = curl_init($url);
-    curl_setopt($ch2, CURLOPT_CUSTOMREQUEST, $method);
-    curl_setopt($ch2, CURLOPT_POSTFIELDS, json_encode($payload));
-    curl_setopt($ch2, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch2, CURLOPT_HTTPHEADER, $headers);
-    curl_setopt($ch2, CURLOPT_TIMEOUT, 3); // 3 ثوانٍ للكتابة
-    curl_exec($ch2);
-    curl_close($ch2);
+    return null; // PUT لا يُعيد بيانات
+}
+// =======================================================
+// 🚀 sync_to_github — wrapper للتوافق العكسي مع الكود القديم
+// ✅ يُحوِّل كل استدعاء قديم إلى kv_request الموحّدة (GitHub مباشرة)
+// =======================================================
+function sync_to_github($path, $data, $method = 'PUT', $commit_message = "Auto-update from system") {
+    // kv_request تتولى SHA + Base64 + HMAC signature + رفع GitHub داخلياً
+    $clean_path = str_replace('.json', '', $path);
+    kv_request($clean_path, $method, $method !== 'DELETE' ? $data : null);
 }
 function simple_php_hash($str) {
     $hash = 0;
@@ -412,7 +467,66 @@ function get_fcm_access_token() {
     curl_close($ch);
     return json_decode($response, true)['access_token'] ?? null;
 }
+// =======================================================
+// 🚀 نظام Cloudflare CDN Cache Purge
+// وظيفة الدالة: مسح الكاش لملفات تاجر محدد فقط لضمان التحديث اللحظي 
+// =======================================================
+function purge_merchant_cloudflare_cache($merchant_username, $pages_count = 1) {
+    $zone_id = getenv('CLOUDFLARE_ZONE_ID') ?: ($_ENV['CLOUDFLARE_ZONE_ID'] ?? '');
+    $api_token = getenv('CLOUDFLARE_API_TOKEN') ?: ($_ENV['CLOUDFLARE_API_TOKEN'] ?? '');
+    $domain = rtrim(getenv('CLOUDFLARE_DOMAIN') ?: ($_ENV['CLOUDFLARE_DOMAIN'] ?? 'https://nalsh.vercel.app'), '/');
 
+    if (empty($zone_id) || empty($api_token)) {
+        error_log("Cloudflare Purge Error: Credentials missing.");
+        return false;
+    }
+
+    // تجهيز مسارات الملفات الخاصة بهذا التاجر فقط (يجب أن تطابق الروابط التي يطلبها الفرونت إند)
+    $base_path = "$domain/stores/$merchant_username";
+    
+    // الملفات الأساسية التي تتحدث دائماً
+    $files_to_purge = [
+        "$base_path/manifest.json",
+        "$base_path/search_index.json",
+        "$base_path/categories.json",
+        "$base_path/info.json"
+    ];
+
+    // إضافة صفحات المنتجات (لأن التاجر قد يكون لديه عدة صفحات)
+    for ($i = 1; $i <= $pages_count; $i++) {
+        $files_to_purge[] = "$base_path/products_page_{$i}.json";
+    }
+
+    // إعداد طلب Cloudflare API (مسح بالروابط - مدعوم في الخطة المجانية)
+    // بحد أقصى 30 رابط في الطلب الواحد حسب قيود كلاودفلير
+    $chunks = array_chunk($files_to_purge, 30);
+    
+    $success = true;
+    foreach ($chunks as $chunk) {
+        $ch = curl_init("https://api.cloudflare.com/client/v4/zones/{$zone_id}/purge_cache");
+        curl_setopt_array($ch, [
+            CURLOPT_CUSTOMREQUEST  => "POST",
+            CURLOPT_POSTFIELDS     => json_encode(["files" => $chunk]),
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT        => 3, // Timeout قصير حتى لا يعلق السيرفر
+            CURLOPT_HTTPHEADER     => [
+                "Authorization: Bearer {$api_token}",
+                "Content-Type: application/json"
+            ]
+        ]);
+        
+        $response = curl_exec($ch);
+        $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+
+        if ($http_code !== 200) {
+            error_log("Cloudflare Purge Failed for {$merchant_username}: HTTP {$http_code} - {$response}");
+            $success = false;
+        }
+    }
+
+    return $success;
+}
 function send_silent_push_to_merchant($merchant_fcm_token, $order_id) {
     if (empty($merchant_fcm_token)) return;
     
@@ -469,46 +583,7 @@ function send_silent_push_to_merchant($merchant_fcm_token, $order_id) {
     }
     curl_close($ch);
 }
-// =======================================================
-// 🚀 دالة تدمير الكاش في Cloudflare آلياً (Purge Cache)
-// =======================================================
-function purge_cloudflare_cache($urls_to_purge) {
-    // جلب المفاتيح من متغيرات البيئة (يجب إضافتها في Render)
-    $zone_id = getenv('CF_ZONE_ID') ?: $_ENV['CF_ZONE_ID'] ?? '';
-    $api_token = getenv('CF_API_TOKEN') ?: $_ENV['CF_API_TOKEN'] ?? '';
-    $domain = getenv('CF_DOMAIN') ?: $_ENV['CF_DOMAIN'] ?? 'https://nalsh.dpdns.org'; // رابط الـ Worker/النطاق الخاص بك
 
-    if (empty($zone_id) || empty($api_token) || empty($urls_to_purge)) return false;
-
-    // تحويل المسارات إلى روابط كاملة
-    $full_urls = array_map(function($path) use ($domain) {
-        return $domain . '/' . ltrim($path, '/');
-    }, $urls_to_purge);
-
-    $url = "https://api.cloudflare.com/client/v4/zones/{$zone_id}/purge_cache";
-    
-    $ch = curl_init($url);
-    curl_setopt($ch, CURLOPT_CUSTOMREQUEST, "POST");
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_TIMEOUT, 3); // عدم تعطيل النظام إذا تأخر Cloudflare
-    curl_setopt($ch, CURLOPT_HTTPHEADER, [
-        "Authorization: Bearer {$api_token}",
-        "Content-Type: application/json"
-    ]);
-    
-    // Cloudflare يسمح بمسح 30 رابط في الطلب الواحد
-    curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode(['files' => $full_urls]));
-    
-    $response = curl_exec($ch);
-    $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    curl_close($ch);
-
-    if ($http_code >= 400) {
-        error_log("Cloudflare Purge Failed: " . $response);
-        return false;
-    }
-    return true;
-}
 function verify_signed_token($token, $expected_purpose) {
     if (empty($token)) throw new Exception("التذكرة مفقودة. تم رفض العملية لتأمين النظام.");
     $parts = explode('.', $token);
@@ -643,7 +718,7 @@ $stmt = $pdo->prepare("SELECT * FROM products WHERE merchant_id = ? AND is_avail
             'pages' => []
         ];
 
-        // 4. رفع الملفات المركبة مباشرة إلى Cloudflare KV
+        // 4. ⭐ رفع جميع الملفات مباشرة إلى GitHub (بديل Cloudflare KV)
         kv_request("{$basePath}search_index", 'PUT', $searchIndex);
         kv_request("{$basePath}categories", 'PUT', $categoriesData);
 
@@ -658,7 +733,8 @@ $stmt = $pdo->prepare("SELECT * FROM products WHERE merchant_id = ? AND is_avail
             $manifestVersions['pages']["page_{$pageNum}"] = $timestamp;
         }
 
-        // رفع ملف المانيفست (Manifest) النهائي لـ KV
+        // 5. رفع ملف المانيفست النهائي إلى GitHub
+        // 5. رفع ملف المانيفست النهائي إلى GitHub
         $manifestPayload = [
             'version' => $timestamp,
             'total_products' => count($products),
@@ -667,30 +743,12 @@ $stmt = $pdo->prepare("SELECT * FROM products WHERE merchant_id = ? AND is_avail
         ];
         kv_request("{$basePath}manifest", 'PUT', $manifestPayload);
 
-        // 5. مزامنة الملفات مع مستودع GitHub الاحتياطي لمطابقة البيانات
-        sync_to_github("{$basePath}manifest.json", $manifestPayload, 'PUT', "Rebuild cache manifest v$timestamp");
-        sync_to_github("{$basePath}search_index.json", $searchIndex, 'PUT', "Rebuild search index v$timestamp");
-        sync_to_github("{$basePath}categories.json", $categoriesData, 'PUT', "Rebuild categories v$timestamp");
-        foreach ($pages as $pageNum => $pageData) {
-            $pagePayload = [
-                '_version' => $timestamp,
-                'page' => $pageNum,
-                'total_pages' => count($pages),
-                'data' => $pageData
-            ];
-            sync_to_github("{$basePath}products_page_{$pageNum}.json", $pagePayload, 'PUT', "Rebuild page $pageNum v$timestamp");
-        }
-$urls_to_purge = [
-            "{$basePath}manifest.json",
-            "{$basePath}search_index.json",
-            "{$basePath}categories.json",
-            "{$basePath}info.json"
-        ];
-        foreach ($pages as $pageNum => $pageData) {
-            $urls_to_purge[] = "{$basePath}products_page_{$pageNum}.json";
-        }
-        
-        purge_cloudflare_cache($urls_to_purge);
+        // =======================================================
+        // ⭐ إضافة: مسح كاش Cloudflare لهذا التاجر فقط
+        // =======================================================
+        $total_pages = count($pages) ?: 1;
+        purge_merchant_cloudflare_cache($merchant_username, $total_pages);
+
         return true;
     } catch (Exception $e) {
         error_log("Failed to rebuild cache for merchant $merchant_id: " . $e->getMessage());
@@ -750,9 +808,21 @@ function extract_coords_from_url($url) {
     return null;
 }
 
+/**
+ * update_kv_manifest — تحديث ملف manifest.json على GitHub مباشرة.
+ * يجلب المانيفست الحالي أولاً لدمج الـ files معه قبل الرفع.
+ */
 function update_kv_manifest($merchant_username) {
-    $manifest_data = ['version' => round(microtime(true) * 1000)];
-    kv_request("stores/$merchant_username/manifest", 'PUT', $manifest_data);
+    $timestamp = round(microtime(true) * 1000);
+
+    // جلب المانيفست الحالي من GitHub (إن وجد) لدمج البيانات
+    $current = kv_request("stores/$merchant_username/manifest", 'GET') ?: [];
+
+    $current['version']   = $timestamp;
+    $current['updated_at'] = date('Y-m-d H:i:s');
+
+    // رفع المانيفست المحدّث مباشرة إلى GitHub
+    kv_request("stores/$merchant_username/manifest", 'PUT', $current);
 }
 
 function is_valid_gps_location($url) {
@@ -796,6 +866,10 @@ function calculate_delivery_fee($distance_km) {
     // تقريب الرقم النهائي (مثلاً 520 تصبح 550)
     return ceil($total_fee / $rounding_factor) * $rounding_factor;
 }
+/**
+ * sync_merchant_info_json — مزامنة بيانات المتجر إلى GitHub مباشرة.
+ * ✅ لا يوجد Cloudflare KV — GitHub هو المصدر الوحيد.
+ */
 function sync_merchant_info_json($pdo, $user_id, $merchant_username) {
     $stmt = $pdo->prepare("SELECT store_name, store_type, phone, settings FROM users WHERE id = ?");
     $stmt->execute([$user_id]);
@@ -804,7 +878,7 @@ function sync_merchant_info_json($pdo, $user_id, $merchant_username) {
     if (!$user_record) return;
 
     $timestamp = round(microtime(true) * 1000);
-    $settings = json_decode($user_record['settings'] ?: '{}', true);
+    $settings  = json_decode($user_record['settings'] ?: '{}', true);
 
     $info_data = [
         '_version'   => $timestamp,
@@ -813,35 +887,25 @@ function sync_merchant_info_json($pdo, $user_id, $merchant_username) {
         'store_name' => $user_record['store_name'],
         'store_type' => $user_record['store_type'],
         'phone'      => $settings['phone'] ?? $user_record['phone'] ?? '',
-        'settings'   => $settings 
+        'settings'   => $settings,
     ];
 
+    // 1. رفع info.json مباشرة إلى GitHub عبر kv_request (الموحّدة)
     kv_request("stores/$merchant_username/info", 'PUT', $info_data);
 
-    // 2. رفع ملف info.json إلى GitHub
-    sync_to_github("stores/$merchant_username/info.json", $info_data, 'PUT', "Update store info v$timestamp");
-
-    // 3. تحديث المانيفست على GitHub
-    $gh_owner = getenv('GITHUB_REPO_OWNER') ?: $_ENV['GITHUB_REPO_OWNER'] ?? '';
-    $gh_repo  = getenv('GITHUB_REPO_NAME') ?: $_ENV['GITHUB_REPO_NAME'] ?? '';
-    $gh_token = getenv('GITHUB_TOKEN') ?: $_ENV['GITHUB_TOKEN'] ?? '';
-    
-    $manifest_url = "https://raw.githubusercontent.com/{$gh_owner}/{$gh_repo}/main/stores/{$merchant_username}/manifest.json";
-    
-    $ch_m = curl_init($manifest_url);
-    curl_setopt($ch_m, CURLOPT_RETURNTRANSFER, true);
-    if(!empty($gh_token)) curl_setopt($ch_m, CURLOPT_HTTPHEADER, ["Authorization: Bearer {$gh_token}"]);
-    $manifest_response = curl_exec($ch_m);
-    
-    $current_manifest = json_decode($manifest_response, true) ?: [];
-    curl_close($ch_m);
+    // 2. تحديث المانيفست على GitHub
+    // 2. تحديث المانيفست على GitHub
+    $manifest_path = "stores/$merchant_username/manifest";
+    $current_manifest = kv_request($manifest_path, 'GET') ?: [];
 
     $current_manifest['version'] = $timestamp;
     if (!isset($current_manifest['files'])) $current_manifest['files'] = [];
     $current_manifest['files']['info'] = $timestamp;
 
-    sync_to_github("stores/$merchant_username/manifest.json", $current_manifest, 'PUT', "Update manifest with info v$timestamp");
-    kv_request("stores/$merchant_username/manifest", 'PUT', $current_manifest);
+    kv_request($manifest_path, 'PUT', $current_manifest);
+    
+    // ⭐ مسح الكاش لملف info فقط بعد تحديثه
+    purge_merchant_cloudflare_cache($merchant_username, 0); // 0 يعني لا تمسح صفحات المنتجات
 }
 function reassign_stale_orders($pdo) {
     try {
@@ -2415,10 +2479,10 @@ try {
                 try {
                     $fb_products_update = [];
                     try {
-                        // جلب كاش المنتجات الحالي من Cloudflare KV
+                        // جلب كاش المنتجات الحالي من GitHub (عبر raw.githubusercontent.com)
                         $fb_products_update = kv_request("stores/$m_username/products") ?: []; 
                     } catch (Exception $kv_err) {
-                        error_log("Ignored KV Fetch error: " . $kv_err->getMessage());
+                        error_log("Ignored GitHub fetch error: " . $kv_err->getMessage());
                     }
                     
                     $needs_github_sync = false; 
