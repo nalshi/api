@@ -75,8 +75,10 @@ if (empty($request_origin) && isset($_SERVER['HTTP_REFERER'])) {
 $matched_origin = '';
 
 if (!empty($request_origin)) {
+    // ⭐ إصلاح أمني: مطابقة تامة للنطاق بدلاً من مطابقة "البداية فقط"
+    // (المطابقة القديمة كانت تسمح لمواقع مثل https://nalsh.vercel.app.attacker.com بالمرور)
     foreach ($allowed_origins as $origin) {
-        if (strpos($request_origin, $origin) === 0) {
+        if (strcasecmp($request_origin, $origin) === 0) {
             $matched_origin = $request_origin;
             break;
         }
@@ -216,11 +218,6 @@ function sync_to_firebase($merchant_username, $node, $item_id, $data, $method = 
         error_log("FIREBASE WRITE FAILED: URL=$url | HTTP_CODE=$http_code | RESPONSE=$response");
     }
 }
-// دالة مساعدة لتوليد المسار السري للطلبات
-function get_firebase_secret_path($user_id, $username) {
-    return md5($user_id . 'SUPER_SECRET_KEY_123' . $username);
-}
-
 // دالة لتسجيل علم إعادة بناء الكاش بصمت لمنع توقف النظام
 function flag_cache_for_rebuild($merchant_id = null) {
     global $pdo;
@@ -406,6 +403,196 @@ function kv_request($path, $method = 'GET', $data = null) {
 
     return null; // PUT لا يُعيد بيانات
 }
+
+// =======================================================
+// 🚀 دالة مساعدة داخلية: تنفيذ طلب HTTP إلى GitHub Git Database API
+// (تُستخدم فقط داخل gh_upload_multiple_files لتفادي تكرار كود cURL)
+// =======================================================
+function _gh_git_api_request($url, $method, $headers, $payload = null, $timeout = 15) {
+    $ch = curl_init($url);
+    $opts = [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_CUSTOMREQUEST  => $method,
+        CURLOPT_HTTPHEADER     => $headers,
+        CURLOPT_TIMEOUT        => $timeout,
+        CURLOPT_SSL_VERIFYPEER => true,
+    ];
+    if ($payload !== null) {
+        $opts[CURLOPT_POSTFIELDS] = json_encode($payload);
+    }
+    curl_setopt_array($ch, $opts);
+    $response  = curl_exec($ch);
+    $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $curl_err  = curl_error($ch);
+    curl_close($ch);
+
+    return [
+        'code'  => $http_code,
+        'body'  => $response ? json_decode($response, true) : null,
+        'raw'   => $response,
+        'error' => $curl_err,
+    ];
+}
+
+/**
+ * =======================================================
+ * 🚀 gh_upload_multiple_files — رفع مجمّع (Batch Upload) لعدة ملفات
+ * في Commit واحد فقط باستخدام GitHub Git Database API (Trees & Commits)
+ * =======================================================
+ * ✅ الهدف: بدلاً من عمل N طلب PUT متتالي عبر kv_request (Contents API)،
+ *    نقوم بعملية واحدة تشمل: قراءة آخر Commit -> إنشاء Tree جديد يحوي
+ *    كل الملفات -> إنشاء Commit واحد -> تحديث مرجع الفرع (ref) ليشير إليه.
+ *    هذا يقلل عدد طلبات HTTP من N إلى ~4 طلبات ثابتة بغض النظر عن عدد
+ *    الملفات، ويقلل أيضاً عدد الـ commits المسجّلة في المستودع (يمنع مشكلة Abuse من GitHub).
+ *
+ * @param string $merchant_username    اسم التاجر (يُستخدم لبناء المسار stores/{username}/{file}.json)
+ * @param array  $files_array          مصفوفة associative: ['filename' => $data_array_or_string, ...]
+ *                                     مثال: ['search_index' => [...], 'categories' => [...], 'products_page_1' => [...]]
+ * @return bool  true عند نجاح كامل العملية، false عند أي فشل
+ */
+function gh_upload_multiple_files($merchant_username, $files_array) {
+    if (empty($files_array) || !is_array($files_array)) {
+        return false;
+    }
+
+    [$gh_token, $gh_owner, $gh_repo] = gh_get_credentials();
+
+    if (empty($gh_token) || empty($gh_owner) || empty($gh_repo)) {
+        error_log("GitHub Batch Upload: بيانات الاعتماد (Token/Owner/Repo) مفقودة.");
+        return false;
+    }
+
+    $api_base = "https://api.github.com/repos/{$gh_owner}/{$gh_repo}";
+    $branch   = "main";
+
+    $headers = [
+        "Authorization: Bearer {$gh_token}",
+        "Accept: application/vnd.github+json",
+        "User-Agent: Nalsh-Ecom-System/2.0",
+        "X-GitHub-Api-Version: 2022-11-28",
+        "Content-Type: application/json",
+    ];
+
+    try {
+        // ──────────────────────────────────────────────
+        // أ) جلب الـ SHA الخاص بآخر Commit في فرع main
+        // ──────────────────────────────────────────────
+        $ref_res = _gh_git_api_request(
+            "{$api_base}/git/ref/heads/{$branch}",
+            'GET',
+            $headers
+        );
+
+        if ($ref_res['code'] !== 200 || empty($ref_res['body']['object']['sha'])) {
+            error_log("GitHub Batch Upload: فشل جلب SHA لآخر Commit [{$ref_res['code']}]: " . $ref_res['raw']);
+            return false;
+        }
+        $latest_commit_sha = $ref_res['body']['object']['sha'];
+
+        // نحتاج SHA الخاص بالـ Tree الأساسي (base tree) المرتبط بآخر Commit
+        // لبناء الشجرة الجديدة فوقه (بدون الحاجة لإعادة رفع كل ملفات المستودع كاملة)
+        $commit_res = _gh_git_api_request(
+            "{$api_base}/git/commits/{$latest_commit_sha}",
+            'GET',
+            $headers
+        );
+
+        if ($commit_res['code'] !== 200 || empty($commit_res['body']['tree']['sha'])) {
+            error_log("GitHub Batch Upload: فشل جلب Base Tree [{$commit_res['code']}]: " . $commit_res['raw']);
+            return false;
+        }
+        $base_tree_sha = $commit_res['body']['tree']['sha'];
+
+        // ──────────────────────────────────────────────
+        // ب) إنشاء Git Tree جديد يحتوي على كل الملفات الممرّرة في $files_array
+        // المسار لكل ملف: stores/{merchant_username}/{filename}.json
+        // ──────────────────────────────────────────────
+        $tree_items = [];
+
+        foreach ($files_array as $filename => $data) {
+            // تنظيف اسم الملف من امتداد .json إن وُجد لتوحيد الشكل، ثم إضافته يدوياً
+            $clean_filename = str_replace('.json', '', $filename);
+            $file_path = "stores/{$merchant_username}/{$clean_filename}.json";
+
+            // دعم تمرير بيانات جاهزة كسلسلة نصية أو كمصفوفة (يتم تحويلها JSON تلقائياً)
+            $json_content = is_string($data)
+                ? $data
+                : json_encode($data, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+
+            $tree_items[] = [
+                "path"    => $file_path,
+                "mode"    => "100644", // ملف عادي (blob)
+                "type"    => "blob",
+                "content" => $json_content,
+            ];
+        }
+
+        $tree_res = _gh_git_api_request(
+            "{$api_base}/git/trees",
+            'POST',
+            $headers,
+            [
+                "base_tree" => $base_tree_sha,
+                "tree"      => $tree_items,
+            ]
+        );
+
+        if ($tree_res['code'] !== 201 || empty($tree_res['body']['sha'])) {
+            error_log("GitHub Batch Upload: فشل إنشاء Tree [{$tree_res['code']}]: " . $tree_res['raw']);
+            return false;
+        }
+        $new_tree_sha = $tree_res['body']['sha'];
+
+        // ──────────────────────────────────────────────
+        // ج) إنشاء Commit واحد جديد يشمل هذه الشجرة الجديدة كاملة
+        // ──────────────────────────────────────────────
+        $timestamp  = date('Y-m-d H:i:s T');
+        $file_count = count($tree_items);
+        $commit_message = "⚡ Batch-sync [{$merchant_username}] | {$file_count} files | {$timestamp}";
+
+        $new_commit_res = _gh_git_api_request(
+            "{$api_base}/git/commits",
+            'POST',
+            $headers,
+            [
+                "message" => $commit_message,
+                "tree"    => $new_tree_sha,
+                "parents" => [$latest_commit_sha],
+            ]
+        );
+
+        if ($new_commit_res['code'] !== 201 || empty($new_commit_res['body']['sha'])) {
+            error_log("GitHub Batch Upload: فشل إنشاء Commit [{$new_commit_res['code']}]: " . $new_commit_res['raw']);
+            return false;
+        }
+        $new_commit_sha = $new_commit_res['body']['sha'];
+
+        // ──────────────────────────────────────────────
+        // د) تحديث مرجع الفرع (Branch Reference) ليشير إلى الـ Commit الجديد
+        // ──────────────────────────────────────────────
+        $update_ref_res = _gh_git_api_request(
+            "{$api_base}/git/refs/heads/{$branch}",
+            'PATCH',
+            $headers,
+            [
+                "sha"   => $new_commit_sha,
+                "force" => false, // نرفض الـ force update لتفادي فقدان أي commits أخرى حدثت بالتوازي
+            ]
+        );
+
+        if ($update_ref_res['code'] !== 200) {
+            error_log("GitHub Batch Upload: فشل تحديث مرجع الفرع [{$update_ref_res['code']}]: " . $update_ref_res['raw']);
+            return false;
+        }
+
+        return true;
+
+    } catch (Exception $e) {
+        error_log("GitHub Batch Upload: استثناء غير متوقع: " . $e->getMessage());
+        return false;
+    }
+}
+
 // =======================================================
 // 🚀 sync_to_github — wrapper للتوافق العكسي مع الكود القديم
 // ✅ يُحوِّل كل استدعاء قديم إلى kv_request الموحّدة (GitHub مباشرة)
@@ -627,6 +814,55 @@ function send_response($status, $data = [], $http_code = 200) {
     exit();
 }
 
+/**
+ * =======================================================
+ * 🚀 send_response_and_continue_in_background — حيلة FastCGI معمّمة
+ * =======================================================
+ * ترسل استجابة JSON نهائية للعميل وتُنهي اتصال الـ HTTP فوراً (أو تُفرغ
+ * المخازن قدر الإمكان في حال عدم توفر fastcgi_finish_request)، بحيث لا
+ * ينتظر المتصفح أي عمليات لاحقة (مثل رفع الملفات إلى GitHub).
+ *
+ * ⚠️ هامة: هذه الدالة لا تستدعي exit() ولا تُنهي تنفيذ السكربت —
+ * فهي تسمح للكود الذي يليها (مثل trigger_cache_rebuild) بالاستمرار
+ * في العمل "في الخلفية" بعد أن يكون العميل قد استلم رده فعلياً.
+ * يجب على المستدعي وضع exit() بعد آخر عملية خلفية إن أراد إيقاف التنفيذ.
+ *
+ * @param string $status    'success' أو 'error'
+ * @param array  $data      بيانات إضافية تُدمج مع status في الاستجابة
+ * @param int    $http_code كود حالة HTTP (افتراضياً 200)
+ */
+function send_response_and_continue_in_background($status, $data = [], $http_code = 200) {
+    $data = is_array($data) ? $data : [];
+    $response_json = json_encode(array_merge(['status' => $status], $data), JSON_UNESCAPED_UNICODE);
+
+    // أ) تنظيف أي مخرجات سابقة في المخزن المؤقت (كما تفعل send_response)
+    if (ob_get_length()) ob_clean();
+    http_response_code($http_code);
+    header('Content-Type: application/json; charset=utf-8');
+    header('Content-Length: ' . strlen($response_json));
+    // إخبار الخادم/المتصفح أن الاتصال سيُغلق فوراً بعد هذه الاستجابة
+    header('Connection: close');
+    echo $response_json;
+
+    // ب) إنهاء الاتصال الفعلي مع العميل بأسرع طريقة متاحة على السيرفر
+    if (function_exists('fastcgi_finish_request')) {
+        // ✅ الطريقة المثلى: متاحة عند تشغيل PHP عبر PHP-FPM (FastCGI)
+        fastcgi_finish_request();
+    } else {
+        // ✅ بديل عام لأي بيئة أخرى (Apache mod_php أو غيرها):
+        // نُفرغ كل مخازن الإخراج فوراً لإرسال البيانات ثم نغلق الجلسة
+        if (session_status() === PHP_SESSION_ACTIVE) {
+            session_write_close();
+        }
+        while (ob_get_level() > 0) {
+            ob_end_flush();
+        }
+        flush();
+    }
+    // من هنا فصاعداً، اتصال الـ HTTP مع العميل قد انتهى فعلياً (أو أُفرغ قدر الإمكان)
+    // وأي كود يُنفَّذ بعد استدعاء هذه الدالة يعمل في الخلفية بهدوء دون أن ينتظره العميل.
+}
+
 function sanitize_input($data) {
     if (is_array($data)) {
         return array_map('sanitize_input', $data);
@@ -718,9 +954,16 @@ $stmt = $pdo->prepare("SELECT * FROM products WHERE merchant_id = ? AND is_avail
             'pages' => []
         ];
 
-        // 4. ⭐ رفع جميع الملفات مباشرة إلى GitHub (بديل Cloudflare KV)
-        kv_request("{$basePath}search_index", 'PUT', $searchIndex);
-        kv_request("{$basePath}categories", 'PUT', $categoriesData);
+        // =======================================================
+        // 4. ⭐ تجميع كل الملفات (search_index + categories + صفحات المنتجات + manifest)
+        //    في مصفوفة واحدة، ثم رفعها بـ Commit واحد فقط عبر
+        //    gh_upload_multiple_files (بدلاً من استدعاء kv_request عدة مرات
+        //    داخل foreach، وهو ما كان يسبب طلبات HTTP متتالية وبطيئة).
+        // =======================================================
+        $files_to_upload = [];
+
+        $files_to_upload['search_index'] = $searchIndex;
+        $files_to_upload['categories']   = $categoriesData;
 
         foreach ($pages as $pageNum => $pageData) {
             $pagePayload = [
@@ -729,27 +972,33 @@ $stmt = $pdo->prepare("SELECT * FROM products WHERE merchant_id = ? AND is_avail
                 'total_pages' => count($pages),
                 'data' => $pageData
             ];
-            kv_request("{$basePath}products_page_{$pageNum}", 'PUT', $pagePayload);
+            $files_to_upload["products_page_{$pageNum}"] = $pagePayload;
             $manifestVersions['pages']["page_{$pageNum}"] = $timestamp;
         }
 
-        // 5. رفع ملف المانيفست النهائي إلى GitHub
-        // 5. رفع ملف المانيفست النهائي إلى GitHub
+        // 5. إضافة ملف المانيفست النهائي إلى نفس دفعة الرفع
         $manifestPayload = [
             'version' => $timestamp,
             'total_products' => count($products),
             'total_pages' => count($pages),
             'files' => $manifestVersions
         ];
-        kv_request("{$basePath}manifest", 'PUT', $manifestPayload);
+        $files_to_upload['manifest'] = $manifestPayload;
+
+        // 6. ⭐ استدعاء واحد فقط لرفع جميع الملفات دفعة واحدة (Batch Upload)
+        $upload_ok = gh_upload_multiple_files($merchant_username, $files_to_upload);
+
+        if (!$upload_ok) {
+            error_log("Batch upload إلى GitHub فشل للتاجر: {$merchant_username}");
+        }
 
         // =======================================================
-        // ⭐ إضافة: مسح كاش Cloudflare لهذا التاجر فقط
+        // ⭐ مسح كاش Cloudflare لهذا التاجر فقط (يبقى كما هو دون تغيير)
         // =======================================================
         $total_pages = count($pages) ?: 1;
         purge_merchant_cloudflare_cache($merchant_username, $total_pages);
 
-        return true;
+        return $upload_ok;
     } catch (Exception $e) {
         error_log("Failed to rebuild cache for merchant $merchant_id: " . $e->getMessage());
         return false;
@@ -3824,15 +4073,23 @@ $params = [
                 $stmt_save->execute($params);
             }
 
-            // 🚀 6. إعادة بناء الكاش بشكل صامت لإبقاء البيانات متطابقة
+            // =======================================================
+            // 🚀 6. حيلة FastCGI: إرسال الاستجابة للتاجر فوراً وإنهاء الاتصال
+            //    قبل تنفيذ trigger_cache_rebuild، حتى لا ينتظر المتصفح
+            //    عملية الرفع إلى GitHub (التي أصبحت أسرع بفضل الـ Batch Upload
+            //    لكنها قد تستغرق ثانية أو أكثر حسب حجم المتجر).
+            // =======================================================
             $merchant_username = $_SESSION['username'] ?? get_username_by_id($pdo, $user_id);
-            trigger_cache_rebuild($user_id, $merchant_username);
-            
-            send_response('success', [
-                'message' => $is_edit ? 'تم تحديث المنتج بأمان.' : 'تم إضافة المنتج بأمان.', 
+
+            send_response_and_continue_in_background('success', [
+                'message' => $is_edit ? 'تم تحديث المنتج بأمان.' : 'تم إضافة المنتج بأمان.',
                 'id' => $pid
             ]);
-            break;
+
+            // من هنا فصاعداً: اتصال الـ HTTP مع التاجر قد انتهى فعلياً،
+            // وأي كود ينفَّذ الآن يعمل في الخلفية بهدوء دون أن ينتظره المتصفح.
+            trigger_cache_rebuild($user_id, $merchant_username);
+            exit();
       
         case 'force_sync_to_firebase':
             if ($user_role !== 'merchant') throw new Exception("غير مصرح لك.");
@@ -4128,14 +4385,19 @@ $params = [
             $stmt_del = $pdo->prepare("DELETE FROM products WHERE id = ? AND merchant_id = ?");
             $stmt_del->execute([$product_id, $user_id]);
 
-            // 🚀 3. تحديث الكاش السحابي فوراً
+            // 🚀 3. حيلة FastCGI: إرسال الاستجابة فوراً للتاجر قبل إعادة بناء
+            //    الكاش السحابي (رفع الملفات إلى GitHub) والحذف من Firebase،
+            //    حتى لا ينتظر المتصفح هذه العمليات الثانوية.
+            send_response_and_continue_in_background('success', ['message' => 'تم حذف المنتج نهائياً بنجاح.']);
+
+            // من هنا فصاعداً: الاتصال مع التاجر انتهى فعلياً، والعمليات التالية
+            // تعمل في الخلفية بهدوء.
             trigger_cache_rebuild($user_id, $merchant_username);
-            
+
             // 4. الحذف من Firebase إن وجد
             fb_request("stores/$merchant_username/products/$product_id.json", 'DELETE');
-            
-            send_response('success',['message' => 'تم حذف المنتج نهائياً بنجاح.']);
-            break;
+
+            exit();
 
         case 'toggle_availability':
             if (!$user_id || $user_role !== 'merchant') send_response('error',['message' => 'غير مصرح'], 401);
@@ -4148,11 +4410,11 @@ $params = [
             $stmt_toggle = $pdo->prepare("UPDATE products SET is_available = ?, updated_at = ? WHERE id = ? AND merchant_id = ?");
             $stmt_toggle->execute([$req_status, time(), $product_id, $user_id]);
 
-            // 🚀 2. تحديث الكاش السحابي فوراً
+            // 🚀 2. حيلة FastCGI: إرسال الاستجابة فوراً ثم إعادة بناء الكاش في الخلفية
+            send_response_and_continue_in_background('success', ['message' => 'تم تحديث حالة عرض المنتج (إخفاء/إظهار) بنجاح.']);
+
             trigger_cache_rebuild($user_id, $merchant_username);
-       
-            send_response('success',['message' => 'تم تحديث حالة عرض المنتج (إخفاء/إظهار) بنجاح.']);
-            break;
+            exit();
 
         case 'add_quantity':
             if (!$user_id || $user_role !== 'merchant') send_response('error',['message' => 'غير مصرح لك.'], 401);
@@ -4209,11 +4471,11 @@ $params = [
                 $stmt_upd->execute([$qty_to_add, time(), $product_id, $user_id]);
             }
 
-            // 🚀 3. أمر بناء الكاش
+            // 🚀 3. حيلة FastCGI: إرسال الاستجابة فوراً ثم إعادة بناء الكاش في الخلفية
+            send_response_and_continue_in_background('success', ['message' => 'تمت إضافة الكمية للمخزون بنجاح ✅']);
+
             trigger_cache_rebuild($user_id, $merchant_username);
-                                  
-            send_response('success',['message' => 'تمت إضافة الكمية للمخزون بنجاح ✅']);
-            break;
+            exit();
 
         case 'process_sale':
             if (!$user_id || $user_role !== 'merchant') send_response('error',['message' => 'غير مصرح'], 401);
@@ -5317,7 +5579,9 @@ $params = [
 
 } catch (PDOException $e) {
     error_log("Database Error in API: " . $e->getMessage());
-    send_response('error',['message' => 'DB Error: ' . $e->getMessage()], 500);
+    // ⭐ إصلاح أمني: عدم إرجاع رسالة الخطأ الخام لقاعدة البيانات للعميل
+    // (كانت تُسرّب تفاصيل داخلية مثل أسماء الجداول والأعمدة). التفاصيل الكاملة تُسجَّل فقط في اللوق أعلاه.
+    send_response('error',['message' => 'حدث خطأ في قاعدة البيانات. يرجى المحاولة لاحقاً.'], 500);
 } catch (Throwable $e) {
     $msg = $e->getMessage();
     if (strpos($msg, 'SQLSTATE') !== false || strpos($msg, 'PDO') !== false || strpos($msg, '/') !== false || strpos($msg, '\\') !== false || strpos($msg, 'on line') !== false) {
