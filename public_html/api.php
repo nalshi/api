@@ -59,7 +59,7 @@ header("Cache-Control: no-store, no-cache, must-revalidate, max-age=0");
 
 // 1. الجدار الناري الصارم: تحديد النطاقات المسموحة فقط
 $allowed_origins = [
-    'https://appi.dpdns.org',
+    'https://nalsh.vercel.app',
 ];
 
 $request_origin = $_SERVER['HTTP_ORIGIN'] ?? '';
@@ -878,75 +878,116 @@ function trigger_cache_rebuild($merchant_id, $merchant_username) {
 
     try {
         // 1. جلب كافة المنتجات النشطة والمقبولة لهذا التاجر من TiDB Cloud
-$stmt = $pdo->prepare("SELECT * FROM products WHERE merchant_id = ? AND is_available = 1 AND (approval_status = 'approved' OR approval_status IS NULL OR approval_status = '')");
+        $stmt = $pdo->prepare("SELECT * FROM products WHERE merchant_id = ? AND is_available = 1 AND (approval_status = 'approved' OR approval_status IS NULL OR approval_status = '')");
         $stmt->execute([$merchant_id]);
         $products = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
+        // 2. جلب فئات هذا التاجر + الفئات العامة المشتركة فقط (استعلام واحد خفيف)
+        $stmt_cats = $pdo->prepare("SELECT id, name, parent_id FROM categories WHERE user_id = ? OR user_id IS NULL ORDER BY parent_id, name");
+        $stmt_cats->execute([$merchant_id]);
+        $all_categories = $stmt_cats->fetchAll(PDO::FETCH_ASSOC);
+
         $timestamp = round(microtime(true) * 1000);
-        
-        // 2. إعداد كشاف البحث السريع (Search Index)
-        $searchIndex = [
-            '_version' => $timestamp,
-            'data' => []
-        ];
-        $categoriesSet = [];
-        $pages = [];
         $PAGE_SIZE = 20;
 
-        foreach ($products as $p) {
-            $searchIndex['data'][] = [
-                'id' => $p['id'],
-                'n' => $p['name'],
-                'p' => (float)$p['price'],
-                'd' => (float)($p['discount'] ?? 0),
-                'i' => $p['image'] ?? '',
-                't' => $p['type'] ?? 'عام',
-                'a' => (int)($p['is_available'] ?? 1)
-            ];
-            
-            $cat = $p['type'] ?? 'عام';
-            if (!in_array($cat, $categoriesSet)) {
-                $categoriesSet[] = $cat;
-            }
-        }
+        // =======================================================
+        // ⭐ إعادة هيكلة كاملة لملفات JSON لمنع تكرار كتابة نفس بيانات
+        //    المنتج أو الفئة في أكثر من ملف:
+        //    - ملفات products_page_N.json هي المصدر الوحيد للبيانات الكاملة للمنتج
+        //      (مُخزَّنة ككائن مفهرس بمعرّف المنتج id => بياناته، وليس كمصفوفة، لسرعة
+        //      الوصول المباشر O(1) بدل البحث الخطي).
+        //    - ملف categories.json يحتوي الشجرة الكاملة للفئات (فئة داخل فئة بلا حد
+        //      للعمق عبر parent_id)، وكل فئة تحمل فقط "مرجعاً مختصراً" لكل منتج تابع لها:
+        //      {id, n: اسم مختصر, pg: رقم الصفحة} — دون تكرار وصف/سعر/صورة المنتج الكامل.
+        //    - ملف search_index.json يبقى خفيفاً جداً لغرض البحث السريع فقط (نفس المرجع
+        //      المختصر أعلاه)، ولا يكرر أي بيانات كاملة أيضاً.
+        //    النتيجة: كل منتج وكل فئة يُكتبان مرة واحدة فقط عبر كل ملفات المتجر،
+        //    ما يقلّل حجم البيانات المرفوعة لكل تحديث ويجعل بناء الكاش أسرع وأخف على السيرفر.
+        // =======================================================
 
-        // 3. تقسيم المنتجات إلى صفحات مجزأة (Pagination)
+        $pages = [];       // pageNum => [ productId => fullProductData ]
+        $productRef = [];  // productId => ['id','n' (اسم مختصر),'pg' (رقم الصفحة),'cid' (معرّف الفئة)]
+
         $chunks = array_chunk($products, $PAGE_SIZE);
         foreach ($chunks as $index => $chunk) {
             $pageNum = $index + 1;
             $pageData = [];
             foreach ($chunk as $p) {
-                $opts = [];
-                if (!empty($p['options'])) {
-                    $opts = json_decode($p['options'], true) ?: [];
-                }
-                $pageData[] = [
+                $opts = !empty($p['options']) ? (json_decode($p['options'], true) ?: []) : [];
+                $feats = !empty($p['features']) ? (json_decode($p['features'], true) ?: []) : [];
+                $cid = !empty($p['category_id']) ? (int)$p['category_id'] : null;
+
+                // البيانات الكاملة تُكتب هنا فقط، مرة واحدة، ضمن ملف صفحتها
+                $pageData[$p['id']] = [
                     'id' => $p['id'],
                     'name' => $p['name'],
-                    'mainDescription' => $p['description'] ?? $p['mainDescription'] ?? '',
+                    'mainDescription' => $p['description'] ?? '',
                     'price' => (float)$p['price'],
                     'discount' => (float)($p['discount'] ?? 0),
                     'image' => $p['image'] ?? '',
                     'type' => $p['type'] ?? 'عام',
+                    'category_id' => $cid,
                     'options' => $opts,
+                    'features' => $feats,
                     'quantity' => (int)($p['quantity'] ?? 0),
                     'quantity_type' => $p['quantity_type'] ?? 'tracked',
                     'is_available' => (int)($p['is_available'] ?? 1)
                 ];
+
+                // مرجع مختصر فقط (اختصار الاسم + رقم الصفحة) يُستخدم في كل من
+                // categories.json و search_index.json بدل تكرار المنتج كاملاً
+                $productRef[$p['id']] = [
+                    'id' => $p['id'],
+                    'n'  => mb_substr((string)$p['name'], 0, 40),
+                    'pg' => $pageNum,
+                    'cid' => $cid,
+                ];
             }
             $pages[$pageNum] = $pageData;
         }
+        if (empty($pages)) $pages[1] = [];
 
-        if (empty($pages)) {
-            $pages[1] = [];
+        // 3. بناء شجرة الفئات الكاملة (تدعم فئة داخل فئة داخل فئة بلا حد للعمق)
+        $catMap = [];
+        foreach ($all_categories as $c) {
+            $catMap[(int)$c['id']] = [
+                'id' => (int)$c['id'],
+                'name' => $c['name'],
+                'parent_id' => !empty($c['parent_id']) ? (int)$c['parent_id'] : 0,
+                'products' => [],
+                'children' => [],
+            ];
         }
+        // ربط كل منتج بفئته عبر مرجعه المختصر فقط (بدون تكرار بياناته الكاملة)
+        foreach ($productRef as $ref) {
+            if ($ref['cid'] && isset($catMap[$ref['cid']])) {
+                $catMap[$ref['cid']]['products'][] = ['id' => $ref['id'], 'n' => $ref['n'], 'pg' => $ref['pg']];
+            }
+        }
+        // ترتيب الفئات هرمياً: كل فئة تُدرَج داخل مصفوفة "children" الخاصة بأبيها
+        $catRoots = [];
+        foreach ($catMap as $id => &$node) {
+            if ($node['parent_id'] && isset($catMap[$node['parent_id']])) {
+                $catMap[$node['parent_id']]['children'][] = &$node;
+            } else {
+                $catRoots[] = &$node;
+            }
+        }
+        unset($node);
 
         $categoriesData = [
             '_version' => $timestamp,
-            'data' => $categoriesSet
+            'data' => $catRoots
         ];
 
-        $basePath = "stores/{$merchant_username}/";
+        // 4. كشاف بحث خفيف جداً: نفس المرجع المختصر فقط (id + اسم + رقم صفحة)
+        $searchIndex = [
+            '_version' => $timestamp,
+            'data' => array_values(array_map(function($r) {
+                return ['id' => $r['id'], 'n' => $r['n'], 'pg' => $r['pg']];
+            }, $productRef))
+        ];
+
         $manifestVersions = [
             'search' => $timestamp,
             'categories' => $timestamp,
@@ -955,7 +996,7 @@ $stmt = $pdo->prepare("SELECT * FROM products WHERE merchant_id = ? AND is_avail
         ];
 
         // =======================================================
-        // 4. ⭐ تجميع كل الملفات (search_index + categories + صفحات المنتجات + manifest)
+        // 5. ⭐ تجميع كل الملفات (search_index + categories + صفحات المنتجات + manifest)
         //    في مصفوفة واحدة، ثم رفعها بـ Commit واحد فقط عبر
         //    gh_upload_multiple_files (بدلاً من استدعاء kv_request عدة مرات
         //    داخل foreach، وهو ما كان يسبب طلبات HTTP متتالية وبطيئة).
@@ -970,13 +1011,13 @@ $stmt = $pdo->prepare("SELECT * FROM products WHERE merchant_id = ? AND is_avail
                 '_version' => $timestamp,
                 'page' => $pageNum,
                 'total_pages' => count($pages),
-                'data' => $pageData
+                'data' => $pageData // كائن مفهرس بمعرّف المنتج، وليس مصفوفة
             ];
             $files_to_upload["products_page_{$pageNum}"] = $pagePayload;
             $manifestVersions['pages']["page_{$pageNum}"] = $timestamp;
         }
 
-        // 5. إضافة ملف المانيفست النهائي إلى نفس دفعة الرفع
+        // 6. إضافة ملف المانيفست النهائي إلى نفس دفعة الرفع
         $manifestPayload = [
             'version' => $timestamp,
             'total_products' => count($products),
@@ -985,7 +1026,7 @@ $stmt = $pdo->prepare("SELECT * FROM products WHERE merchant_id = ? AND is_avail
         ];
         $files_to_upload['manifest'] = $manifestPayload;
 
-        // 6. ⭐ استدعاء واحد فقط لرفع جميع الملفات دفعة واحدة (Batch Upload)
+        // 7. ⭐ استدعاء واحد فقط لرفع جميع الملفات دفعة واحدة (Batch Upload)
         $upload_ok = gh_upload_multiple_files($merchant_username, $files_to_upload);
 
         if (!$upload_ok) {
@@ -1232,8 +1273,8 @@ function resolve_or_create_category($pdo, $name, $parent_id, $user_id) {
     if ($existing_id) return (int)$existing_id;
 
     try {
-        $stmt_ins = $pdo->prepare("INSERT INTO categories (name, parent_id, user_id) VALUES (?, ?, ?)");
-        $stmt_ins->execute([$name, $parent_id, $user_id]);
+        $stmt_ins = $pdo->prepare("INSERT INTO categories (name, parent_id, user_id, created_at) VALUES (?, ?, ?, ?)");
+        $stmt_ins->execute([$name, $parent_id, $user_id, round(microtime(true) * 1000)]);
         return (int)$pdo->lastInsertId();
     } catch (PDOException $e) {
         // تعارض غير متوقع (مثل قيد تفرّد لا يأخذ user_id بعين الاعتبار) — لا نفشل نشر المنتج،
@@ -1338,10 +1379,32 @@ try {
             `keywords` TEXT,
             INDEX `merchant_idx` (`merchant_id`)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;");
-        
-        // إضافة عمود parent_id للفئات إن لم يكن موجوداً
+
+        // ⭐ إصلاح جذري: إنشاء جدول الفئات categories إن لم يكن موجوداً إطلاقاً.
+        //    (هذا هو السبب الأساسي لرسالة "حدث خطأ في قاعدة البيانات" عند إضافة منتج
+        //    أو استخدام الفئات: كانت أوامر SELECT/INSERT على جدول categories تفشل لأن
+        //    الجدول نفسه غير موجود في قاعدة البيانات، فيلتقطها catch(PDOException)
+        //    في نهاية الملف ويحوّلها لرسالة عامة دون تفاصيل).
+        $pdo->exec("CREATE TABLE IF NOT EXISTS `categories` (
+            `id` INT AUTO_INCREMENT PRIMARY KEY,
+            `name` VARCHAR(150) NOT NULL,
+            `parent_id` INT DEFAULT 0,
+            `user_id` INT DEFAULT NULL,
+            `created_at` BIGINT,
+            INDEX `parent_idx` (`parent_id`),
+            INDEX `user_idx` (`user_id`),
+            UNIQUE KEY `uniq_name_parent_user` (`name`, `parent_id`, `user_id`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;");
+
+        // إضافة الأعمدة المطلوبة إن كان الجدول موجوداً مسبقاً بنسخة قديمة ناقصة الأعمدة
         try {
             $pdo->exec("ALTER TABLE categories ADD COLUMN parent_id INT DEFAULT 0");
+        } catch (Exception $e) {}
+        try {
+            $pdo->exec("ALTER TABLE categories ADD COLUMN user_id INT DEFAULT NULL");
+        } catch (Exception $e) {}
+        try {
+            $pdo->exec("ALTER TABLE categories ADD COLUMN created_at BIGINT DEFAULT NULL");
         } catch (Exception $e) {}
     } catch (Exception $e) {}
 
