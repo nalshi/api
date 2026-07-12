@@ -59,7 +59,7 @@ header("Cache-Control: no-store, no-cache, must-revalidate, max-age=0");
 
 // 1. الجدار الناري الصارم: تحديد النطاقات المسموحة فقط
 $allowed_origins = [
-    'https://appi.dpdns.org',
+    'https://nalsh.vercel.app',
 ];
 
 $request_origin = $_SERVER['HTTP_ORIGIN'] ?? '';
@@ -1241,27 +1241,20 @@ function get_full_category_paths($pdo) {
 }
 
 // دالة جديدة لبناء شجرة الفئات
-function build_category_tree($pdo) {
+// ✅ ترجع قائمة "مسطّحة" (flat) وليست متداخلة، لأن الواجهة الأمامية تبني الشجرة بنفسها
+//    من خلال حقل parent_id لكل عنصر. إرجاع بنية متداخلة (children) كان يسبب اختفاء أي
+//    فئة أعمق من المستوى الأول (فئة داخل فئة داخل فئة) من قوائم الاختيار في لوحة التاجر.
+// ✅ تُفلتر النتائج بحيث يرى كل تاجر فئاته الخاصة فقط + الفئات العامة المشتركة
+//    (user_id = NULL)، ولا يرى فئات تاجر آخر إطلاقاً.
+function build_category_tree($pdo, $user_id = null) {
     try {
-        $stmt = $pdo->query("SELECT id, name, parent_id FROM categories ORDER BY parent_id, name");
-        $categories = $stmt->fetchAll(PDO::FETCH_ASSOC);
-        $tree = [];
-        $indexed = [];
-        
-        foreach ($categories as $cat) {
-            $indexed[$cat['id']] = $cat;
-            $indexed[$cat['id']]['children'] = [];
+        if ($user_id) {
+            $stmt = $pdo->prepare("SELECT id, name, parent_id FROM categories WHERE (user_id = ? OR user_id IS NULL) ORDER BY parent_id, name");
+            $stmt->execute([$user_id]);
+        } else {
+            $stmt = $pdo->query("SELECT id, name, parent_id FROM categories WHERE user_id IS NULL ORDER BY parent_id, name");
         }
-        
-        foreach ($indexed as $id => &$cat) {
-            if ($cat['parent_id'] == 0 || is_null($cat['parent_id'])) {
-                $tree[] = &$cat;
-            } else if (isset($indexed[$cat['parent_id']])) {
-                $indexed[$cat['parent_id']]['children'][] = &$cat;
-            }
-        }
-        
-        return $tree;
+        return $stmt->fetchAll(PDO::FETCH_ASSOC);
     } catch (Exception $e) {
         return [];
     }
@@ -4034,28 +4027,89 @@ try {
             if (empty($desc)) throw new Exception('وصف المنتج مطلوب.');
             if ($sell_price <= 0) throw new Exception('سعر البيع يجب أن يكون أكبر من صفر.');
             
-            // 3. معالجة التصنيف مع دعم الفئات المتداخلة
+            // 3. معالجة التصنيف مع دعم الفئات المتداخلة (فئة داخل فئة داخل فئة... بلا حد للعمق)
+            // ✅ الفئات الجديدة لا تُحفظ في قاعدة البيانات إلا هنا، أي فقط لحظة نشر/حفظ المنتج فعلياً.
+            //    قبل ذلك تبقى الفئات المُضافة من الواجهة "معلّقة" في المتصفح فقط ولا تُسجَّل أبداً.
+            // ✅ كل عملية بحث/إنشاء/تحقق من فئة تكون مقيدة بهذا التاجر (user_id) فقط، بحيث لا يرى
+            //    تاجر فئات تاجر آخر ولا يتم الخلط بينها حتى لو تشابهت الأسماء.
             $category_id_input = sanitize_input($_POST['category_id'] ?? '');
             $category_id = null;
             $category_name = 'عام';
-            
-            if (strpos($category_id_input, 'NEW_CAT:') === 0) {
-                // صيغة: NEW_CAT:parent_id::اسم_الفئة
+
+            if ($category_id_input === 'NEW_CHAIN') {
+                // صيغة جديدة: سلسلة كاملة من الفئات المتداخلة غير المحفوظة بعد
+                // category_chain_names: ["الأب", "الابن", "الحفيد", ...] من الأعلى إلى الأدنى
+                // category_anchor_id: معرف فئة حقيقية موجودة مسبقاً تُربط بها السلسلة (أو 0 إن كانت فئة رئيسية جديدة بالكامل)
+                $chain_raw = $_POST['category_chain_names'] ?? '[]';
+                $chain_names = json_decode($chain_raw, true);
+                $anchor_id = (int)($_POST['category_anchor_id'] ?? 0);
+
+                // تحقق أن نقطة الربط (إن وُجدت) تعود فعلاً لهذا التاجر أو فئة عامة مشتركة
+                $parent_id = 0;
+                if ($anchor_id > 0) {
+                    $stmt_anchor = $pdo->prepare("SELECT id FROM categories WHERE id = ? AND (user_id = ? OR user_id IS NULL)");
+                    $stmt_anchor->execute([$anchor_id, $user_id]);
+                    $parent_id = (int)($stmt_anchor->fetchColumn() ?: 0);
+                }
+
+                if (is_array($chain_names)) {
+                    foreach ($chain_names as $cat_step_name) {
+                        $cat_step_name = sanitize_input($cat_step_name);
+                        if ($cat_step_name === '') continue;
+
+                        // ابحث إن كانت هذه الفئة موجودة مسبقاً لنفس التاجر ضمن نفس المستوى، لتفادي التكرار
+                        $stmt_find = $pdo->prepare("SELECT id FROM categories WHERE name = ? AND parent_id = ? AND user_id = ? LIMIT 1");
+                        $stmt_find->execute([$cat_step_name, $parent_id, $user_id]);
+                        $existing_id = $stmt_find->fetchColumn();
+
+                        if ($existing_id) {
+                            $parent_id = (int)$existing_id;
+                        } else {
+                            $stmt_ins = $pdo->prepare("INSERT INTO categories (name, parent_id, user_id) VALUES (?, ?, ?)");
+                            $stmt_ins->execute([$cat_step_name, $parent_id, $user_id]);
+                            $parent_id = (int)$pdo->lastInsertId();
+                        }
+                        $category_name = $cat_step_name;
+                    }
+                    $category_id = $parent_id > 0 ? $parent_id : null;
+                }
+            } else if (strpos($category_id_input, 'NEW_CAT:') === 0) {
+                // (توافق قديم لطلبات من نسخة واجهة سابقة) — صيغة: NEW_CAT:parent_id::اسم_الفئة
                 $parts = explode('::', substr($category_id_input, 8));
                 $parent_id = (int)($parts[0] ?? 0);
                 $category_name = sanitize_input($parts[1] ?? '');
-                
+
+                if ($parent_id > 0) {
+                    $stmt_p = $pdo->prepare("SELECT COUNT(*) FROM categories WHERE id = ? AND (user_id = ? OR user_id IS NULL)");
+                    $stmt_p->execute([$parent_id, $user_id]);
+                    if (!$stmt_p->fetchColumn()) $parent_id = 0;
+                }
+
                 if (!empty($category_name)) {
-                    $pdo->prepare("INSERT IGNORE INTO categories (name, parent_id, user_id) VALUES (?, ?, ?)")->execute([$category_name, $parent_id, $user_id]);
-                    $stmt_cat = $pdo->prepare("SELECT id FROM categories WHERE name = ? AND parent_id = ? LIMIT 1");
-                    $stmt_cat->execute([$category_name, $parent_id]);
-                    $category_id = $stmt_cat->fetchColumn();
+                    $stmt_find = $pdo->prepare("SELECT id FROM categories WHERE name = ? AND parent_id = ? AND user_id = ? LIMIT 1");
+                    $stmt_find->execute([$category_name, $parent_id, $user_id]);
+                    $category_id = $stmt_find->fetchColumn();
+
+                    if (!$category_id) {
+                        $pdo->prepare("INSERT INTO categories (name, parent_id, user_id) VALUES (?, ?, ?)")->execute([$category_name, $parent_id, $user_id]);
+                        $category_id = $pdo->lastInsertId();
+                    }
                 }
             } else if (is_numeric($category_id_input)) {
-                $category_id = (int)$category_id_input;
-                $stmt_cat = $pdo->prepare("SELECT name FROM categories WHERE id = ?");
-                $stmt_cat->execute([$category_id]);
-                $category_name = $stmt_cat->fetchColumn() ?: 'عام';
+                // فئة موجودة مسبقاً — تحقق من ملكيتها (تعود لهذا التاجر أو فئة عامة مشتركة)
+                $candidate_id = (int)$category_id_input;
+                $stmt_cat = $pdo->prepare("SELECT id, name FROM categories WHERE id = ? AND (user_id = ? OR user_id IS NULL)");
+                $stmt_cat->execute([$candidate_id, $user_id]);
+                $row_cat = $stmt_cat->fetch(PDO::FETCH_ASSOC);
+
+                if ($row_cat) {
+                    $category_id = (int)$row_cat['id'];
+                    $category_name = $row_cat['name'];
+                } else {
+                    // فئة غير موجودة أو لا تعود لهذا التاجر — لا نسمح بربط المنتج بها
+                    $category_id = null;
+                    $category_name = 'عام';
+                }
             }
             
             // معالجة الميزات/الخصائص (حتى 10 ميزات)
@@ -5278,7 +5332,8 @@ $params = [
             if (!$user_id) send_response('error',['message' => 'غير مصرح'], 401);
             
             try {
-                $tree = build_category_tree($pdo);
+                // ✅ كل تاجر يستلم فقط فئاته الخاصة (user_id = هو) + الفئات العامة المشتركة (user_id = NULL)
+                $tree = build_category_tree($pdo, $user_id);
                 send_response('success',['data' => $tree]);
             } catch (PDOException $e) {
                 send_response('success',['data' => []]);
@@ -5286,11 +5341,22 @@ $params = [
             break;
             
         case 'create_category':
+            // ⚠️ ملاحظة: لوحة التاجر لم تعد تستدعي هذا المسار عند إضافة منتج جديد —
+            // إنشاء الفئات (بما فيها الفئات المتداخلة) أصبح يُؤجَّل ويُنفَّذ فقط داخل
+            // save_product عند نشر المنتج فعلياً، لتفادي تراكم فئات فارغة في قاعدة البيانات.
+            // يبقى هذا المسار متاحاً لأي استخدام إداري/مستقبلي آخر.
             if (!$user_id) send_response('error',['message' => 'غير مصرح'], 401);
             $name = sanitize_input($input['name'] ?? '');
             $parent_id = intval($input['parent_id'] ?? 0);
             
             if (empty($name)) throw new Exception('اسم الفئة مطلوب');
+            
+            // تحقق أن الفئة الأب (إن وُجدت) تعود لنفس التاجر أو فئة عامة، منعاً لأي تلاعب
+            if ($parent_id > 0) {
+                $stmt_p = $pdo->prepare("SELECT COUNT(*) FROM categories WHERE id = ? AND (user_id = ? OR user_id IS NULL)");
+                $stmt_p->execute([$parent_id, $user_id]);
+                if (!$stmt_p->fetchColumn()) $parent_id = 0;
+            }
             
             try {
                 $stmt = $pdo->prepare("INSERT INTO categories (name, parent_id, user_id) VALUES (?, ?, ?)");
