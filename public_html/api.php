@@ -59,7 +59,7 @@ header("Cache-Control: no-store, no-cache, must-revalidate, max-age=0");
 
 // 1. الجدار الناري الصارم: تحديد النطاقات المسموحة فقط
 $allowed_origins = [
-    'https://nalsh.vercel.app',
+    'https://appi.dpdns.org',
 ];
 
 $request_origin = $_SERVER['HTTP_ORIGIN'] ?? '';
