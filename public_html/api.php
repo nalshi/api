@@ -1388,9 +1388,16 @@ try {
         //    الحل: نتأكد من وجود كل عمود مطلوب ونضيفه إن كان ناقصاً، بأمان تام
         //    (كل عملية معزولة بـ try/catch حتى لا تتوقف البقية إن كان العمود موجوداً أصلاً).
         $products_columns_to_ensure = [
+            "description"     => "ALTER TABLE products ADD COLUMN description TEXT",
             "cost_price"      => "ALTER TABLE products ADD COLUMN cost_price DECIMAL(10,2) DEFAULT 0",
             "discount"        => "ALTER TABLE products ADD COLUMN discount DECIMAL(5,2) DEFAULT 0",
+            "image"           => "ALTER TABLE products ADD COLUMN image TEXT",
+            "type"            => "ALTER TABLE products ADD COLUMN type VARCHAR(100) DEFAULT 'عام'",
+            "options"         => "ALTER TABLE products ADD COLUMN options JSON",
+            "features"        => "ALTER TABLE products ADD COLUMN features JSON",
+            "quantity"        => "ALTER TABLE products ADD COLUMN quantity INT DEFAULT 0",
             "quantity_type"   => "ALTER TABLE products ADD COLUMN quantity_type ENUM('tracked','unlimited') DEFAULT 'tracked'",
+            "is_available"    => "ALTER TABLE products ADD COLUMN is_available TINYINT(1) DEFAULT 1",
             "currency"        => "ALTER TABLE products ADD COLUMN currency VARCHAR(10) DEFAULT 'YER'",
             "updated_at"      => "ALTER TABLE products ADD COLUMN updated_at BIGINT",
             "approval_status" => "ALTER TABLE products ADD COLUMN approval_status VARCHAR(50) DEFAULT 'approved'",
