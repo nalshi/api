@@ -59,7 +59,7 @@ header("Cache-Control: no-store, no-cache, must-revalidate, max-age=0");
 
 // 1. الجدار الناري الصارم: تحديد النطاقات المسموحة فقط
 $allowed_origins = [
-    'https://appi.dpdns.org',
+    'https://nalsh.vercel.app',
 ];
 
 $request_origin = $_SERVER['HTTP_ORIGIN'] ?? '';
@@ -1218,6 +1218,32 @@ function reassign_stale_orders($pdo) {
 
 function push_update_to_clients($topic, $data) {
     return;
+}
+
+// ✅ يبحث عن فئة (باسمها وأبيها) ضمن فئات هذا التاجر أو الفئات العامة المشتركة، وإن لم توجد ينشئها.
+//    مصمّمة عمداً لتكون "مقاومة للأعطال": بعض قواعد البيانات قد يكون فيها قيد تفرّد (UNIQUE)
+//    قديم على (name, parent_id) فقط دون user_id — ما قد يسبب فشل الإدخال إن استخدم تاجرٌ آخر
+//    نفس اسم الفئة من قبل. بدل أن يفشل نشر المنتج بالكامل برسالة "خطأ في قاعدة البيانات"،
+//    نلتقط هذا التعارض ونعيد استخدام أي فئة مطابقة موجودة فعلاً بدلاً من ذلك.
+function resolve_or_create_category($pdo, $name, $parent_id, $user_id) {
+    $stmt_find = $pdo->prepare("SELECT id FROM categories WHERE name = ? AND parent_id = ? AND (user_id = ? OR user_id IS NULL) LIMIT 1");
+    $stmt_find->execute([$name, $parent_id, $user_id]);
+    $existing_id = $stmt_find->fetchColumn();
+    if ($existing_id) return (int)$existing_id;
+
+    try {
+        $stmt_ins = $pdo->prepare("INSERT INTO categories (name, parent_id, user_id) VALUES (?, ?, ?)");
+        $stmt_ins->execute([$name, $parent_id, $user_id]);
+        return (int)$pdo->lastInsertId();
+    } catch (PDOException $e) {
+        // تعارض غير متوقع (مثل قيد تفرّد لا يأخذ user_id بعين الاعتبار) — لا نفشل نشر المنتج،
+        // بل نستخدم أي فئة مطابقة موجودة فعلاً في قاعدة البيانات بنفس الاسم والأب.
+        $stmt_fallback = $pdo->prepare("SELECT id FROM categories WHERE name = ? AND parent_id = ? LIMIT 1");
+        $stmt_fallback->execute([$name, $parent_id]);
+        $fallback_id = $stmt_fallback->fetchColumn();
+        if ($fallback_id) return (int)$fallback_id;
+        throw $e; // لم نجد أي بديل مناسب — أعد رمي الاستثناء الأصلي
+    }
 }
 
 function get_full_category_paths($pdo) {
@@ -4057,18 +4083,9 @@ try {
                         $cat_step_name = sanitize_input($cat_step_name);
                         if ($cat_step_name === '') continue;
 
-                        // ابحث إن كانت هذه الفئة موجودة مسبقاً لنفس التاجر ضمن نفس المستوى، لتفادي التكرار
-                        $stmt_find = $pdo->prepare("SELECT id FROM categories WHERE name = ? AND parent_id = ? AND user_id = ? LIMIT 1");
-                        $stmt_find->execute([$cat_step_name, $parent_id, $user_id]);
-                        $existing_id = $stmt_find->fetchColumn();
-
-                        if ($existing_id) {
-                            $parent_id = (int)$existing_id;
-                        } else {
-                            $stmt_ins = $pdo->prepare("INSERT INTO categories (name, parent_id, user_id) VALUES (?, ?, ?)");
-                            $stmt_ins->execute([$cat_step_name, $parent_id, $user_id]);
-                            $parent_id = (int)$pdo->lastInsertId();
-                        }
+                        // ✅ نستخدم دالة مقاومة للأعطال بدل إدخال مباشر، حتى لا يفشل نشر
+                        // المنتج بخطأ قاعدة بيانات عام إن تكرر اسم الفئة مع تاجر آخر
+                        $parent_id = resolve_or_create_category($pdo, $cat_step_name, $parent_id, $user_id);
                         $category_name = $cat_step_name;
                     }
                     $category_id = $parent_id > 0 ? $parent_id : null;
@@ -4086,14 +4103,8 @@ try {
                 }
 
                 if (!empty($category_name)) {
-                    $stmt_find = $pdo->prepare("SELECT id FROM categories WHERE name = ? AND parent_id = ? AND user_id = ? LIMIT 1");
-                    $stmt_find->execute([$category_name, $parent_id, $user_id]);
-                    $category_id = $stmt_find->fetchColumn();
-
-                    if (!$category_id) {
-                        $pdo->prepare("INSERT INTO categories (name, parent_id, user_id) VALUES (?, ?, ?)")->execute([$category_name, $parent_id, $user_id]);
-                        $category_id = $pdo->lastInsertId();
-                    }
+                    // ✅ نفس الدالة المقاومة للأعطال، بدل إدخال مباشر قد يفشل بخطأ قاعدة بيانات
+                    $category_id = resolve_or_create_category($pdo, $category_name, $parent_id, $user_id);
                 }
             } else if (is_numeric($category_id_input)) {
                 // فئة موجودة مسبقاً — تحقق من ملكيتها (تعود لهذا التاجر أو فئة عامة مشتركة)
@@ -5359,9 +5370,8 @@ $params = [
             }
             
             try {
-                $stmt = $pdo->prepare("INSERT INTO categories (name, parent_id, user_id) VALUES (?, ?, ?)");
-                $stmt->execute([$name, $parent_id, $user_id]);
-                send_response('success',['message' => 'تم إنشاء الفئة بنجاح', 'id' => $pdo->lastInsertId()]);
+                $new_id = resolve_or_create_category($pdo, $name, $parent_id, $user_id);
+                send_response('success',['message' => 'تم إنشاء الفئة بنجاح', 'id' => $new_id]);
             } catch (PDOException $e) {
                 throw new Exception('فشل إنشاء الفئة: ' . $e->getMessage());
             }
