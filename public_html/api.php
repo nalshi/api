@@ -59,7 +59,7 @@ header("Cache-Control: no-store, no-cache, must-revalidate, max-age=0");
 
 // 1. الجدار الناري الصارم: تحديد النطاقات المسموحة فقط
 $allowed_origins = [
-    'https://appi.dpdns.org',
+    'https://nalsh.vercel.app',
 ];
 
 $request_origin = $_SERVER['HTTP_ORIGIN'] ?? '';
@@ -1222,13 +1222,46 @@ function push_update_to_clients($topic, $data) {
 
 function get_full_category_paths($pdo) {
     try {
-        $stmt = $pdo->query("SELECT id, name FROM categories");
+        $stmt = $pdo->query("SELECT id, name, parent_id FROM categories ORDER BY parent_id, name");
         $categories = $stmt->fetchAll(PDO::FETCH_ASSOC);
         $paths = [];
+        
         foreach ($categories as $cat) {
-            $paths[$cat['id']] = $cat['name'];
+            if ($cat['parent_id'] == 0 || is_null($cat['parent_id'])) {
+                $paths[$cat['id']] = $cat['name'];
+            } else {
+                $parent_name = isset($paths[$cat['parent_id']]) ? $paths[$cat['parent_id']] : '';
+                $paths[$cat['id']] = $parent_name ? $parent_name . ' > ' . $cat['name'] : $cat['name'];
+            }
         }
         return $paths;
+    } catch (Exception $e) {
+        return [];
+    }
+}
+
+// دالة جديدة لبناء شجرة الفئات
+function build_category_tree($pdo) {
+    try {
+        $stmt = $pdo->query("SELECT id, name, parent_id FROM categories ORDER BY parent_id, name");
+        $categories = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        $tree = [];
+        $indexed = [];
+        
+        foreach ($categories as $cat) {
+            $indexed[$cat['id']] = $cat;
+            $indexed[$cat['id']]['children'] = [];
+        }
+        
+        foreach ($indexed as $id => &$cat) {
+            if ($cat['parent_id'] == 0 || is_null($cat['parent_id'])) {
+                $tree[] = &$cat;
+            } else if (isset($indexed[$cat['parent_id']])) {
+                $indexed[$cat['parent_id']]['children'][] = &$cat;
+            }
+        }
+        
+        return $tree;
     } catch (Exception $e) {
         return [];
     }
@@ -1273,6 +1306,7 @@ try {
             `image` TEXT,
             `type` VARCHAR(100) DEFAULT 'عام',
             `options` JSON,
+            `features` JSON,
             `quantity` INT DEFAULT 0,
             `quantity_type` ENUM('tracked', 'unlimited') DEFAULT 'tracked',
             `is_available` TINYINT(1) DEFAULT 1,
@@ -1285,6 +1319,11 @@ try {
             `keywords` TEXT,
             INDEX `merchant_idx` (`merchant_id`)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;");
+        
+        // إضافة عمود parent_id للفئات إن لم يكن موجوداً
+        try {
+            $pdo->exec("ALTER TABLE categories ADD COLUMN parent_id INT DEFAULT 0");
+        } catch (Exception $e) {}
     } catch (Exception $e) {}
 
     $input =[];
@@ -3995,17 +4034,46 @@ try {
             if (empty($desc)) throw new Exception('وصف المنتج مطلوب.');
             if ($sell_price <= 0) throw new Exception('سعر البيع يجب أن يكون أكبر من صفر.');
             
-            // 3. معالجة التصنيف
+            // 3. معالجة التصنيف مع دعم الفئات المتداخلة
             $category_id_input = sanitize_input($_POST['category_id'] ?? '');
+            $category_id = null;
             $category_name = 'عام';
+            
             if (strpos($category_id_input, 'NEW_CAT:') === 0) {
-                $category_name = trim(substr($category_id_input, 8));
-                $pdo->prepare("INSERT IGNORE INTO categories (name, user_id) VALUES (?, ?)")->execute([$category_name, $user_id]);
+                // صيغة: NEW_CAT:parent_id::اسم_الفئة
+                $parts = explode('::', substr($category_id_input, 8));
+                $parent_id = (int)($parts[0] ?? 0);
+                $category_name = sanitize_input($parts[1] ?? '');
+                
+                if (!empty($category_name)) {
+                    $pdo->prepare("INSERT IGNORE INTO categories (name, parent_id, user_id) VALUES (?, ?, ?)")->execute([$category_name, $parent_id, $user_id]);
+                    $stmt_cat = $pdo->prepare("SELECT id FROM categories WHERE name = ? AND parent_id = ? LIMIT 1");
+                    $stmt_cat->execute([$category_name, $parent_id]);
+                    $category_id = $stmt_cat->fetchColumn();
+                }
             } else if (is_numeric($category_id_input)) {
+                $category_id = (int)$category_id_input;
                 $stmt_cat = $pdo->prepare("SELECT name FROM categories WHERE id = ?");
-                $stmt_cat->execute([$category_id_input]);
+                $stmt_cat->execute([$category_id]);
                 $category_name = $stmt_cat->fetchColumn() ?: 'عام';
             }
+            
+            // معالجة الميزات/الخصائص (حتى 10 ميزات)
+            $features = [];
+            for ($i = 1; $i <= 10; $i++) {
+                $feature_key = "feature_key_$i";
+                $feature_value = "feature_value_$i";
+                $key = sanitize_input($_POST[$feature_key] ?? '');
+                $value = sanitize_input($_POST[$feature_value] ?? '');
+                
+                if (!empty($key) && !empty($value)) {
+                    $features[] = [
+                        'key' => $key,
+                        'value' => $value
+                    ];
+                }
+            }
+            $features_json = json_encode($features, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
 
             // 4. رفع الصورة بأمان
             $img = sanitize_input($_POST['existing_image'] ?? '');
@@ -4049,25 +4117,25 @@ try {
                 // استبدل استعلام الـ UPDATE القديم بهذا:
                 $sql = "UPDATE products SET 
                         name = ?, description = ?, price = ?, cost_price = ?, discount = ?, 
-                        image = ?, type = ?, options = ?, quantity = ?, quantity_type = ?, 
-                        is_available = ?, currency = ?, updated_at = ?, approval_status = 'approved'
+                        image = ?, type = ?, options = ?, features = ?, quantity = ?, quantity_type = ?, 
+                        is_available = ?, currency = ?, updated_at = ?, category_id = ?, approval_status = 'approved'
                         WHERE id = ? AND merchant_id = ?";
                 $params = [
                     $name, $desc, $sell_price, $cost_price, $discount_percent, 
-                    $img, $category_name, $options, $quantity, $quantity_type, 
-                    $is_available, $currency, time(), $pid, $user_id
+                    $img, $category_name, $options, $features_json, $quantity, $quantity_type, 
+                    $is_available, $currency, time(), $category_id, $pid, $user_id
                 ];
                 $stmt_save = $pdo->prepare($sql);
                 $stmt_save->execute($params);
             } else {
                 // استبدل استعلام الـ INSERT القديم بهذا:
 $sql = "INSERT INTO products 
-        (id, merchant_id, name, description, price, cost_price, discount, image, type, options, quantity, quantity_type, is_available, currency, updated_at, approval_status) 
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'approved')";
+        (id, merchant_id, name, description, price, cost_price, discount, image, type, options, features, quantity, quantity_type, is_available, currency, updated_at, category_id, approval_status) 
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'approved')";
 $params = [
     $pid, $user_id, $name, $desc, $sell_price, $cost_price, $discount_percent, 
-    $img, $category_name, $options, $quantity, $quantity_type, 
-    $is_available, $currency, time()
+    $img, $category_name, $options, $features_json, $quantity, $quantity_type, 
+    $is_available, $currency, time(), $category_id
 ];
                 $stmt_save = $pdo->prepare($sql);
                 $stmt_save->execute($params);
@@ -5209,25 +5277,69 @@ $params = [
         case 'get_categories_tree':
             if (!$user_id) send_response('error',['message' => 'غير مصرح'], 401);
             
-            $sql = "SELECT id, name FROM categories ORDER BY name ASC";
-            
             try {
-                $stmt = $pdo->prepare($sql); 
-                $stmt->execute(); 
-                $flat_categories = $stmt->fetchAll(PDO::FETCH_ASSOC);
-                
-                $unique_cats = [];
-                $seen = [];
-                foreach($flat_categories as $cat) {
-                    if(!in_array($cat['name'], $seen)) {
-                        $unique_cats[] = $cat;
-                        $seen[] = $cat['name'];
-                    }
-                }
-                
-                send_response('success',['data' => $unique_cats]);
+                $tree = build_category_tree($pdo);
+                send_response('success',['data' => $tree]);
             } catch (PDOException $e) {
                 send_response('success',['data' => []]);
+            }
+            break;
+            
+        case 'create_category':
+            if (!$user_id) send_response('error',['message' => 'غير مصرح'], 401);
+            $name = sanitize_input($input['name'] ?? '');
+            $parent_id = intval($input['parent_id'] ?? 0);
+            
+            if (empty($name)) throw new Exception('اسم الفئة مطلوب');
+            
+            try {
+                $stmt = $pdo->prepare("INSERT INTO categories (name, parent_id, user_id) VALUES (?, ?, ?)");
+                $stmt->execute([$name, $parent_id, $user_id]);
+                send_response('success',['message' => 'تم إنشاء الفئة بنجاح', 'id' => $pdo->lastInsertId()]);
+            } catch (PDOException $e) {
+                throw new Exception('فشل إنشاء الفئة: ' . $e->getMessage());
+            }
+            break;
+            
+        case 'update_category':
+            if (!$user_id) send_response('error',['message' => 'غير مصرح'], 401);
+            $id = intval($input['id'] ?? 0);
+            $name = sanitize_input($input['name'] ?? '');
+            $parent_id = intval($input['parent_id'] ?? 0);
+            
+            if (empty($name)) throw new Exception('اسم الفئة مطلوب');
+            if ($id <= 0) throw new Exception('معرّف الفئة غير صحيح');
+            
+            try {
+                $stmt = $pdo->prepare("UPDATE categories SET name = ?, parent_id = ? WHERE id = ? AND (user_id = ? OR user_id IS NULL)");
+                $stmt->execute([$name, $parent_id, $id, $user_id]);
+                send_response('success',['message' => 'تم تحديث الفئة بنجاح']);
+            } catch (PDOException $e) {
+                throw new Exception('فشل تحديث الفئة');
+            }
+            break;
+            
+        case 'delete_category':
+            if (!$user_id) send_response('error',['message' => 'غير مصرح'], 401);
+            $id = intval($input['id'] ?? 0);
+            
+            if ($id <= 0) throw new Exception('معرّف الفئة غير صحيح');
+            
+            try {
+                // التحقق من عدم وجود منتجات أو فئات فرعية
+                $check_prods = $pdo->prepare("SELECT COUNT(*) FROM products WHERE category_id = ?");
+                $check_prods->execute([$id]);
+                if ($check_prods->fetchColumn() > 0) throw new Exception('لا يمكن حذف فئة تحتوي على منتجات');
+                
+                $check_children = $pdo->prepare("SELECT COUNT(*) FROM categories WHERE parent_id = ?");
+                $check_children->execute([$id]);
+                if ($check_children->fetchColumn() > 0) throw new Exception('لا يمكن حذف فئة تحتوي على فئات فرعية');
+                
+                $stmt = $pdo->prepare("DELETE FROM categories WHERE id = ? AND (user_id = ? OR user_id IS NULL)");
+                $stmt->execute([$id, $user_id]);
+                send_response('success',['message' => 'تم حذف الفئة بنجاح']);
+            } catch (PDOException $e) {
+                throw new Exception('فشل حذف الفئة');
             }
             break;
 
