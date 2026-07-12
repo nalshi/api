@@ -59,7 +59,7 @@ header("Cache-Control: no-store, no-cache, must-revalidate, max-age=0");
 
 // 1. الجدار الناري الصارم: تحديد النطاقات المسموحة فقط
 $allowed_origins = [
-    'https://appi.dpdns.org',
+    'https://nalsh.vercel.app',
 ];
 
 $request_origin = $_SERVER['HTTP_ORIGIN'] ?? '';
@@ -1379,6 +1379,32 @@ try {
             `keywords` TEXT,
             INDEX `merchant_idx` (`merchant_id`)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;");
+
+        // ⭐ إصلاح جذري ثانٍ: CREATE TABLE IF NOT EXISTS لا يفعل شيئاً إن كان الجدول
+        //    "products" موجوداً بالفعل من نسخة سابقة للنظام لا تحتوي على أعمدة أُضيفت
+        //    لاحقاً (مثل category_id، approval_status، isAvailable...). في هذه الحالة
+        //    أي استعلام INSERT/UPDATE/SELECT يذكر هذه الأعمدة يفشل بخطأ
+        //    "Unknown column" ويظهر للتاجر كرسالة عامة "حدث خطأ في قاعدة البيانات".
+        //    الحل: نتأكد من وجود كل عمود مطلوب ونضيفه إن كان ناقصاً، بأمان تام
+        //    (كل عملية معزولة بـ try/catch حتى لا تتوقف البقية إن كان العمود موجوداً أصلاً).
+        $products_columns_to_ensure = [
+            "cost_price"      => "ALTER TABLE products ADD COLUMN cost_price DECIMAL(10,2) DEFAULT 0",
+            "discount"        => "ALTER TABLE products ADD COLUMN discount DECIMAL(5,2) DEFAULT 0",
+            "quantity_type"   => "ALTER TABLE products ADD COLUMN quantity_type ENUM('tracked','unlimited') DEFAULT 'tracked'",
+            "currency"        => "ALTER TABLE products ADD COLUMN currency VARCHAR(10) DEFAULT 'YER'",
+            "updated_at"      => "ALTER TABLE products ADD COLUMN updated_at BIGINT",
+            "approval_status" => "ALTER TABLE products ADD COLUMN approval_status VARCHAR(50) DEFAULT 'approved'",
+            "isAvailable"     => "ALTER TABLE products ADD COLUMN isAvailable TINYINT(1) DEFAULT 1",
+            "category_id"     => "ALTER TABLE products ADD COLUMN category_id INT",
+            "department"      => "ALTER TABLE products ADD COLUMN department VARCHAR(100) DEFAULT 'عام'",
+            "keywords"        => "ALTER TABLE products ADD COLUMN keywords TEXT",
+        ];
+        foreach ($products_columns_to_ensure as $col => $alter_sql) {
+            try { $pdo->exec($alter_sql); } catch (Exception $e) {}
+        }
+        try {
+            $pdo->exec("ALTER TABLE products ADD INDEX category_idx (category_id)");
+        } catch (Exception $e) {}
 
         // ⭐ إصلاح جذري: إنشاء جدول الفئات categories إن لم يكن موجوداً إطلاقاً.
         //    (هذا هو السبب الأساسي لرسالة "حدث خطأ في قاعدة البيانات" عند إضافة منتج
