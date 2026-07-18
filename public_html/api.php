@@ -872,6 +872,59 @@ function sanitize_input($data) {
     // يجب تطبيق htmlspecialchars عند عرض البيانات في HTML فقط.
     return trim($data ?? '');
 }
+
+/**
+ * =======================================================
+ * ⚡ sync_user_to_worker — مزامنة فورية لبيانات المستخدم إلى D1 (Cloudflare Worker)
+ * =======================================================
+ * تُستدعى بعد كل تسجيل دخول ناجح لضمان أن الداشبورد (الذي أصبح يعتمد على
+ * الـ Worker/D1 لكل شيء عدا تسجيل الدخول) يرى دائماً أحدث بيانات المستخدم.
+ * لا تُفشل تسجيل الدخول أبداً حتى لو تعذّر الاتصال بالـ Worker (best-effort،
+ * بمهلة قصيرة جداً، وتُستدعى دائماً بعد إرسال الرد للمستخدم).
+ */
+function sync_user_to_worker($pdo, $user_id) {
+    try {
+        $worker_url = getenv('WORKER_API_URL') ?: ($_ENV['WORKER_API_URL'] ?? '');
+        $internal_key = getenv('INTERNAL_SYNC_KEY') ?: ($_ENV['INTERNAL_SYNC_KEY'] ?? '');
+        if (empty($worker_url) || empty($internal_key)) return;
+
+        $stmt = $pdo->prepare(
+            "SELECT id, username, role, store_name, phone, store_type, settings, fcm_token,
+                    UNIX_TIMESTAMP(created_at) as created_at
+             FROM users WHERE id = ?"
+        );
+        $stmt->execute([$user_id]);
+        $u = $stmt->fetch(PDO::FETCH_ASSOC);
+        if (!$u) return;
+
+        $payload = [
+            'action'     => 'sync_user',
+            'id'         => (string)$u['id'],
+            'username'   => $u['username'],
+            'role'       => $u['role'],
+            'store_name' => $u['store_name'],
+            'phone'      => $u['phone'],
+            'store_type' => $u['store_type'],
+            'settings'   => $u['settings'], // نص JSON جاهز أصلاً من عمود settings
+            'fcm_token'  => $u['fcm_token'],
+            'created_at' => $u['created_at'] ? ((int)$u['created_at'] * 1000) : null,
+        ];
+
+        $ch = curl_init(rtrim($worker_url, '/'));
+        curl_setopt_array($ch, [
+            CURLOPT_POST => true,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT => 3,
+            CURLOPT_CONNECTTIMEOUT => 2,
+            CURLOPT_HTTPHEADER => ['Content-Type: application/json', 'X-Internal-Key: ' . $internal_key],
+            CURLOPT_POSTFIELDS => json_encode($payload, JSON_UNESCAPED_UNICODE),
+        ]);
+        curl_exec($ch);
+        curl_close($ch);
+    } catch (Throwable $e) {
+        error_log('sync_user_to_worker error: ' . $e->getMessage());
+    }
+}
 function trigger_cache_rebuild($merchant_id, $merchant_username) {
     global $pdo;
     if (!$pdo) return false;
@@ -1458,6 +1511,7 @@ try {
         'login', 'check_phone', 'register_init', 'register_verify',
         'select_role', 'verify_new_device_otp', 'resend_device_otp',
         'recover_init', 'recover_check_otp', 'recover_set_password', 'build_cache_cron',
+        'worker_sync_settings', // نداء داخلي من الـ Worker فقط، محمي بمفتاح X-Internal-Key بدلاً من JWT
     ];
 
     $auth_header = $_SERVER['HTTP_AUTHORIZATION'] ?? $_SERVER['Authorization'] ?? '';
@@ -3347,8 +3401,9 @@ try {
             $token = generate_signed_token($payload, 480);
             
             $redirect = ($user['role'] === 'merchant') ? 'merchant-dashboard.php' : 'delivery-dashboard.php';
-            send_response('success',['token' => $token, 'redirect' => $redirect]);
-            break;
+            send_response_and_continue_in_background('success', ['token' => $token, 'redirect' => $redirect]);
+            sync_user_to_worker($pdo, $user['id']);
+            exit();
 
         case 'login':
             try { $pdo->exec("ALTER TABLE users ADD COLUMN failed_login_attempts INT DEFAULT 0 AFTER password"); } catch (Exception $e) {}
@@ -3500,7 +3555,11 @@ try {
                 $redirect = ($user['role'] === 'merchant') ? 'merchant-dashboard.php' : 'delivery-dashboard.php';
                 if ($needs_settings) $redirect .= '?force_settings=1';
 
-                send_response('success',['token' => $token, 'redirect' => $redirect]);
+                // ⚡ أرسل الرد فوراً للمستخدم، ثم زامن بياناته إلى D1/Worker في الخلفية
+                // بدون أي تأخير محسوس على سرعة تسجيل الدخول
+                send_response_and_continue_in_background('success', ['token' => $token, 'redirect' => $redirect]);
+                sync_user_to_worker($pdo, $user['id']);
+                exit();
 
             } else {
                 $selection_data =[];
@@ -5357,6 +5416,36 @@ $params = [
                 if ($pdo->inTransaction()) $pdo->rollBack();
                 throw $e;
             }
+            break;
+
+        case 'worker_sync_settings':
+            // ⚠️ هذا المسار لا يُستدعى من الواجهة أبداً - فقط من الـ Worker نفسه
+            // (بعد أن يحفظ إعدادات التاجر في D1) ليُبقي TiDB متزامنة لأجل
+            // تطبيقي المندوب والإدارة اللذين ما زالا يقرآن من TiDB مباشرة.
+            $internal_key_header = $_SERVER['HTTP_X_INTERNAL_KEY'] ?? '';
+            $expected_internal_key = getenv('INTERNAL_SYNC_KEY') ?: ($_ENV['INTERNAL_SYNC_KEY'] ?? '');
+            if (empty($expected_internal_key) || !hash_equals($expected_internal_key, $internal_key_header)) {
+                send_response('error', ['message' => 'غير مصرح'], 401);
+            }
+
+            $sync_uid = sanitize_input($input['id'] ?? '');
+            if (empty($sync_uid)) send_response('error', ['message' => 'معرف المستخدم مطلوب'], 400);
+
+            $sync_store_name = sanitize_input($input['store_name'] ?? '');
+            $sync_store_type = sanitize_input($input['store_type'] ?? '');
+            $sync_settings_raw = $input['settings'] ?? '{}';
+            $sync_settings_json = is_string($sync_settings_raw) ? $sync_settings_raw : json_encode($sync_settings_raw, JSON_UNESCAPED_UNICODE);
+
+            $stmt_sync = $pdo->prepare("UPDATE users SET store_name = ?, store_type = ?, settings = ? WHERE id = ?");
+            $stmt_sync->execute([$sync_store_name, $sync_store_type, $sync_settings_json, $sync_uid]);
+
+            // إعادة توليد info.json ورفعه لـ GitHub حتى تبقى صفحة المتجر العامة متوافقة
+            $sync_username = get_username_by_id($pdo, $sync_uid);
+            if ($sync_username && function_exists('sync_merchant_info_json')) {
+                try { sync_merchant_info_json($pdo, $sync_uid, $sync_username); } catch (Throwable $e) {}
+            }
+
+            send_response('success', ['message' => 'تمت مزامنة الإعدادات مع TiDB بنجاح']);
             break;
 
         case 'save_merchant_settings':
