@@ -3469,9 +3469,12 @@ try {
             $token = generate_signed_token($payload, 480);
             
             $redirect = ($user['role'] === 'merchant') ? 'merchant-dashboard.php' : 'delivery-dashboard.php';
-            send_response_and_continue_in_background('success', ['token' => $token, 'redirect' => $redirect]);
+            // ⭐ تصحيح (2026-07-21): نفس تصحيح مزامنة العميل — نزامن التاجر إلى D1
+            // *قبل* إرسال الرد، لأن send_response_and_continue_in_background تعتمد
+            // على fastcgi_finish_request غير المضمونة على منصات مثل Render، وهذا
+            // كان يمنع مزامنة أي تاجر إطلاقاً حتى الآن.
             sync_user_to_worker($pdo, $user['id']);
-            exit();
+            send_response('success', ['token' => $token, 'redirect' => $redirect]);
 
         case 'login':
             try { $pdo->exec("ALTER TABLE users ADD COLUMN failed_login_attempts INT DEFAULT 0 AFTER password"); } catch (Exception $e) {}
@@ -3623,11 +3626,12 @@ try {
                 $redirect = ($user['role'] === 'merchant') ? 'merchant-dashboard.php' : 'delivery-dashboard.php';
                 if ($needs_settings) $redirect .= '?force_settings=1';
 
-                // ⚡ أرسل الرد فوراً للمستخدم، ثم زامن بياناته إلى D1/Worker في الخلفية
-                // بدون أي تأخير محسوس على سرعة تسجيل الدخول
-                send_response_and_continue_in_background('success', ['token' => $token, 'redirect' => $redirect]);
+                // ⭐ تصحيح (2026-07-21): كانت المزامنة تصير بعد send_response_and_continue_in_background
+                // اللي تعتمد على fastcgi_finish_request غير المضمونة على Render، فما كانت
+                // تنفّذ فعلياً أبداً. الآن نزامن *قبل* إرسال الرد لضمان وصول بيانات
+                // التاجر لـ D1 قبل أي طلب لاحق (مثل create_order من العميل).
                 sync_user_to_worker($pdo, $user['id']);
-                exit();
+                send_response('success', ['token' => $token, 'redirect' => $redirect]);
 
             } else {
                 $selection_data =[];
