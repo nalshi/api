@@ -1451,7 +1451,8 @@ register_shutdown_function(function() {
 // 3. الاتصال بقاعدة البيانات ومعالجة الطلب
 // =======================================================
 try {
-    require_once (__DIR__ . '/nalsh-user-admin-name.php');
+    require_once (__DIR__) . '/nalsh-user-admin-name.php';
+    
     // إنشاء وتهيئة الهيكل الموحد لجدول المنتجات في TiDB لضمان استقرار العمليات دون الحاجة لـ D1
     try {
         $pdo->exec("CREATE TABLE IF NOT EXISTS `products` (
@@ -2306,22 +2307,30 @@ try {
                     'role' => 'customer'
                 ];
                 // APP_SECRET_KEY مُعرَّف بالفعل عند بداية الملف عبر متغيرات البيئة
-                $customer_jwt_token = generate_signed_token($payload_token, 43200); // 30 days
-                
+                $customer_jwt_token = generate_signed_token($payload_token, 527040); // ⭐ أكثر من سنة (366 يوم) بدل 30 يوم
+
                 session_write_close();
 
-                send_response_and_continue_in_background('success',[
+                // ⭐ تصحيح (2026-07-21): نقلنا المزامنة إلى D1 لتصير *قبل* إرسال الرد
+                // وليس بعده. السبب: send_response_and_continue_in_background تعتمد على
+                // fastcgi_finish_request()، وهي تقنية خاصة بـ PHP-FPM فقط. على منصات
+                // استضافة مُدارة مثل Render (اللي ما تستخدم بالضرورة PHP-FPM بنفس
+                // الإعداد)، دالة fastcgi_finish_request قد لا تكون متاحة، فيدخل الكود
+                // بالمسار البديل (flush فقط) اللي لا يضمن استمرار تنفيذ PHP فعلياً
+                // بعد إغلاق الاتصال مع العميل — والنتيجة عملياً أن sync_customer_to_worker
+                // لا تُنفَّذ إطلاقاً على الإنتاج رغم عدم وجود أي خطأ ظاهر (لأنها best-effort
+                // ومغلّفة بـ try/catch). لتفادي هذا نهائياً، نستدعيها الآن بشكل متزامن
+                // (تضيف ~100-300ms على رد تسجيل الدخول) قبل إرسال التوكن للعميل، حتى
+                // تكون بيانات العميل موجودة في D1 بشكل مضمون قبل أي استدعاء لاحق فوري
+                // لـ check_customer_session من الواجهة.
+                sync_customer_to_worker($pdo, $cust['id']);
+
+                send_response('success',[
                     'message' => 'تم تسجيل الدخول بنجاح!', 
                     'token' => $customer_jwt_token, 
                     'customer' => ['full_name' => $cust['full_name'], 'phone' => $phone], 
                     'needs_profile_update' => $is_new_user
                 ]);
-                // ⭐ إضافة (2026-07-21): مزامنة بيانات العميل فوراً إلى D1 (الـ Worker)
-                // بنفس نمط sync_user_to_worker المستخدم للتجار، حتى تكون بيانات
-                // العميل (الاسم/الهاتف/العنوان) متاحة للـ Worker عند check_customer_session
-                // و create_order دون انتظار أي مزامنة لاحقة. best-effort ولا توقف الاستجابة.
-                sync_customer_to_worker($pdo, $cust['id']);
-                exit();
             } else {
                 $payload['attempts']++;
                 if ($payload['attempts'] >= 3) {
