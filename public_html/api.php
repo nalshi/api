@@ -1451,8 +1451,7 @@ register_shutdown_function(function() {
 // 3. الاتصال بقاعدة البيانات ومعالجة الطلب
 // =======================================================
 try {
-    require_once (__DIR__) . '/nalsh-user-admin-name.php';
-    
+    require_once (__DIR__ . '/nalsh-user-admin-name.php');
     // إنشاء وتهيئة الهيكل الموحد لجدول المنتجات في TiDB لضمان استقرار العمليات دون الحاجة لـ D1
     try {
         $pdo->exec("CREATE TABLE IF NOT EXISTS `products` (
