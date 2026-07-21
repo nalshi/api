@@ -925,6 +925,53 @@ function sync_user_to_worker($pdo, $user_id) {
         error_log('sync_user_to_worker error: ' . $e->getMessage());
     }
 }
+/**
+ * =======================================================
+ * ⭐ إضافة (2026-07-21): sync_customer_to_worker — مزامنة فورية لبيانات
+ * العميل إلى D1 (Cloudflare Worker)، بنفس نمط sync_user_to_worker تماماً.
+ * تُستدعى بعد نجاح تسجيل دخول العميل (auth_verify_otp) حتى يقدر الـ Worker
+ * يخدم check_customer_session و create_order و get_user_orders مباشرة
+ * دون المرور على api.php. best-effort ولا تُفشل تسجيل الدخول أبداً.
+ * =======================================================
+ */
+function sync_customer_to_worker($pdo, $customer_id) {
+    try {
+        $worker_url = getenv('WORKER_API_URL') ?: ($_ENV['WORKER_API_URL'] ?? '');
+        $internal_key = getenv('INTERNAL_SYNC_KEY') ?: ($_ENV['INTERNAL_SYNC_KEY'] ?? '');
+        if (empty($worker_url) || empty($internal_key)) return;
+
+        $stmt = $pdo->prepare(
+            "SELECT id, full_name, phone, address, is_active FROM customers WHERE id = ?"
+        );
+        $stmt->execute([$customer_id]);
+        $c = $stmt->fetch(PDO::FETCH_ASSOC);
+        if (!$c) return;
+
+        $payload = [
+            'action'    => 'sync_customer',
+            'id'        => (string)$c['id'],
+            'full_name' => $c['full_name'],
+            'phone'     => $c['phone'],
+            'address'   => $c['address'],
+            'is_active' => isset($c['is_active']) ? (int)$c['is_active'] : 1,
+        ];
+
+        $ch = curl_init(rtrim($worker_url, '/'));
+        curl_setopt_array($ch, [
+            CURLOPT_POST => true,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT => 3,
+            CURLOPT_CONNECTTIMEOUT => 2,
+            CURLOPT_HTTPHEADER => ['Content-Type: application/json', 'X-Internal-Key: ' . $internal_key],
+            CURLOPT_POSTFIELDS => json_encode($payload, JSON_UNESCAPED_UNICODE),
+        ]);
+        curl_exec($ch);
+        curl_close($ch);
+    } catch (Throwable $e) {
+        error_log('sync_customer_to_worker error: ' . $e->getMessage());
+    }
+}
+
 function trigger_cache_rebuild($merchant_id, $merchant_username) {
     global $pdo;
     if (!$pdo) return false;
@@ -2249,6 +2296,13 @@ try {
                 
                 $payload_token = [
                     'customer_id' => $cust['id'],
+                    // ⭐ إضافة (2026-07-21): الـ Worker (Cloudflare) يرفض أي توكن بدون
+                    // user_id صراحة (security/auth.js). العملاء تاريخياً يستخدمون
+                    // customer_id فقط، فنضيف user_id كنسخة مطابقة له حتى تصير
+                    // توكنات العملاء صالحة للمصادقة على الـ Worker أيضاً، دون أي
+                    // تأثير على أي كود قديم بـ api.php (لأنه ما يزال يقرأ customer_id
+                    // كما هو تماماً).
+                    'user_id' => $cust['id'],
                     'customer_name' => $cust['full_name'],
                     'role' => 'customer'
                 ];
@@ -2257,12 +2311,18 @@ try {
                 
                 session_write_close();
 
-                send_response('success',[
+                send_response_and_continue_in_background('success',[
                     'message' => 'تم تسجيل الدخول بنجاح!', 
                     'token' => $customer_jwt_token, 
                     'customer' => ['full_name' => $cust['full_name'], 'phone' => $phone], 
                     'needs_profile_update' => $is_new_user
                 ]);
+                // ⭐ إضافة (2026-07-21): مزامنة بيانات العميل فوراً إلى D1 (الـ Worker)
+                // بنفس نمط sync_user_to_worker المستخدم للتجار، حتى تكون بيانات
+                // العميل (الاسم/الهاتف/العنوان) متاحة للـ Worker عند check_customer_session
+                // و create_order دون انتظار أي مزامنة لاحقة. best-effort ولا توقف الاستجابة.
+                sync_customer_to_worker($pdo, $cust['id']);
+                exit();
             } else {
                 $payload['attempts']++;
                 if ($payload['attempts'] >= 3) {
