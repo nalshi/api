@@ -3698,6 +3698,13 @@ try {
                 $token = generate_signed_token($payload, 480);
                 
                 $redirect = ($user['role'] === 'merchant') ? 'merchant-dashboard.html' : 'delivery-dashboard.html';
+                // ⭐ تصحيح (2026-07-21): هذا المسار (تسجيل دخول بجهاز جديد عبر كود
+                // تحقق) كان لا يستدعي sync_user_to_worker() إطلاقاً من الأساس —
+                // بعكس مسارات تسجيل الدخول الأخرى. وهو الأشيع عملياً (أي دخول من
+                // جهاز/متصفح جديد أو بعد تسجيل خروج)، فكان سبب استمرار خلو جدول
+                // users في D1 من بيانات التاجر حتى بعد تصحيح مشكلة التايمنج بالمسارات
+                // الأخرى.
+                sync_user_to_worker($pdo, $user['id']);
                 send_response('success',['token' => $token, 'redirect' => $redirect]);
             } else {
                 $selection_data =[];
@@ -3841,7 +3848,11 @@ try {
             
             // توليد ملف المتجر الأولي في GitHub
             sync_merchant_info_json($pdo, $new_merchant_id, $merchant_username);
-            
+
+            // ⭐ تصحيح: حساب التاجر/المندوب الجديد ما كان يتزامن مع D1 إطلاقاً عند
+            // إنشائه لأول مرة — فيضل غائب عن الـ Worker لحد أول تسجيل دخول لاحق.
+            sync_user_to_worker($pdo, $new_merchant_id);
+
             setcookie('state_token', '', ['expires' => time() - 3600, 'path' => '/', 'secure' => $is_secure, 'httponly' => true, 'samesite' => $is_secure ? 'None' : 'Lax']);
             send_response('success',['message' => 'تم تفعيل حسابك بنجاح! يمكنك الآن تسجيل الدخول.']);
             break;        
@@ -3870,6 +3881,9 @@ try {
 
             $stmt = $pdo->prepare("INSERT INTO users (username, password, store_name, phone, role, is_active, employer_id, settings) VALUES (?, ?, ?, ?, 'delivery', 1, ?, ?)");
             $stmt->execute([$u, $hashed_pass, $s, $phone, $user_id, $settings_json]);
+
+            // ⭐ تصحيح: نفس المشكلة — المندوب الخاص الجديد ما كان يتزامن مع D1
+            sync_user_to_worker($pdo, $pdo->lastInsertId());
 
             send_response('success',['message' => 'تم إضافة المندوب الخاص بنجاح.']);
             break;
