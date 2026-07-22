@@ -1,4 +1,5 @@
 <?php
+error_log("DEPLOY_MARKER_v2026_07_22_SYNC_FIX action=" . ($_POST['action'] ?? ($_GET['action'] ?? (json_decode(file_get_contents('php://input'), true)['action'] ?? 'unknown'))));
 // =======================================================
 // ملف API الشامل (النسخة المتطورة أمنياً - الجدار الأمني 12.0)
 // ⭐ تم التحديث لدعم نظام المتاجر المتعددة (Multi-Vendor) ⭐
