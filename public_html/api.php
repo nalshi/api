@@ -903,7 +903,7 @@ function sync_user_to_worker($pdo, $user_id) {
 
         $payload = [
             'action'     => 'sync_user',
-            'id'         => (int)$u['id'],
+            'id'         => (string)$u['id'],
             'username'   => $u['username'],
             'role'       => $u['role'],
             'store_name' => $u['store_name'],
@@ -965,7 +965,7 @@ function sync_customer_to_worker($pdo, $customer_id) {
 
         $payload = [
             'action'    => 'sync_customer',
-            'id'        => (int)$c['id'],
+            'id'        => (string)$c['id'],
             'full_name' => $c['full_name'],
             'phone'     => $c['phone'],
             'address'   => $c['address'],
@@ -1583,6 +1583,7 @@ try {
         'select_role', 'verify_new_device_otp', 'resend_device_otp',
         'recover_init', 'recover_check_otp', 'recover_set_password', 'build_cache_cron',
         'worker_sync_settings', // نداء داخلي من الـ Worker فقط، محمي بمفتاح X-Internal-Key بدلاً من JWT
+        'worker_sync_new_order', // ⭐ نداء داخلي من الـ Worker بعد إنشاء/دمج طلب في D1، محمي بنفس المفتاح
     ];
 
     $auth_header = $_SERVER['HTTP_AUTHORIZATION'] ?? $_SERVER['Authorization'] ?? '';
@@ -5526,6 +5527,42 @@ $params = [
                 if ($pdo->inTransaction()) $pdo->rollBack();
                 throw $e;
             }
+            break;
+
+        case 'worker_sync_new_order':
+            // ⚠️ هذا المسار لا يُستدعى من الواجهة أبداً - فقط من الـ Worker نفسه
+            // (بعد أن ينشئ/يدمج التذكرة في D1) ليُبقي TiDB متزامنة، لأن نظام
+            // موافقة/رفض/تحديث حالة الطلب (merchant_approve_order وأخواتها) وتطبيقا
+            // المندوب والزبون لا يزالوا يقرؤون فقط من TiDB مباشرة، ولم يُنقلوا لـ D1 بعد.
+            $sync_key_header = $_SERVER['HTTP_X_INTERNAL_KEY'] ?? '';
+            $sync_expected_key = getenv('INTERNAL_SYNC_KEY') ?: ($_ENV['INTERNAL_SYNC_KEY'] ?? '');
+            if (empty($sync_expected_key) || !hash_equals($sync_expected_key, $sync_key_header)) {
+                send_response('error', ['message' => 'غير مصرح'], 401);
+            }
+
+            $wt_ticket_id = sanitize_input($input['ticket_id'] ?? '');
+            $wt_order_group_id = sanitize_input($input['order_group_id'] ?? '');
+            $wt_merchant_id = sanitize_input($input['merchant_id'] ?? '');
+            $wt_customer_id = sanitize_input($input['customer_id'] ?? '');
+            $wt_status = sanitize_input($input['status'] ?? 'pending_merchant_approval');
+            $wt_delivery_code = (int)($input['delivery_code'] ?? 0);
+            $wt_ticket_data_raw = $input['ticket_data'] ?? '{}';
+            $wt_ticket_data = is_string($wt_ticket_data_raw) ? $wt_ticket_data_raw : json_encode($wt_ticket_data_raw, JSON_UNESCAPED_UNICODE);
+
+            if (empty($wt_ticket_id) || empty($wt_merchant_id) || empty($wt_customer_id)) {
+                send_response('error', ['message' => 'بيانات التذكرة ناقصة'], 400);
+            }
+
+            $stmt_wt = $pdo->prepare(
+                "INSERT INTO live_tickets (ticket_id, order_group_id, merchant_id, customer_id, status, delivery_code, ticket_data)
+                 VALUES (?, ?, ?, ?, ?, ?, ?)
+                 ON DUPLICATE KEY UPDATE
+                    ticket_data = VALUES(ticket_data),
+                    status = VALUES(status)"
+            );
+            $stmt_wt->execute([$wt_ticket_id, $wt_order_group_id, $wt_merchant_id, $wt_customer_id, $wt_status, $wt_delivery_code, $wt_ticket_data]);
+
+            send_response('success', ['message' => 'تمت مزامنة الطلب مع TiDB بنجاح']);
             break;
 
         case 'worker_sync_settings':
