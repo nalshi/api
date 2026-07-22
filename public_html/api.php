@@ -996,6 +996,47 @@ function sync_customer_to_worker($pdo, $customer_id) {
     }
 }
 
+/**
+ * ⭐ إضافة: مزامنة عكسية لحالة التذكرة إلى D1 (الـ Worker) بعد أي تغيير نهائي على
+ * حالتها في MySQL (موافقة/رفض/تحديث حالة/إلغاء/تسليم) عبر أكشنات api.php القديمة.
+ * بدون هذا، تبقى نسخة D1 من التذكرة بحالتها القديمة (pending) للأبد، فيعتبرها
+ * create_order بالـ Worker "تذكرة قائمة" قابلة للدمج مع طلب جديد لاحق لنفس
+ * العميل/التاجر، ويُعيد إحياء طلبات مُلغاة/مكتملة بالخطأ في MySQL.
+ */
+function sync_ticket_status_to_worker($ticket_id, $status) {
+    try {
+        $worker_url = getenv('WORKER_API_URL') ?: ($_ENV['WORKER_API_URL'] ?? '');
+        $internal_key = getenv('INTERNAL_SYNC_KEY') ?: ($_ENV['INTERNAL_SYNC_KEY'] ?? '');
+        if (empty($worker_url) || empty($internal_key)) {
+            error_log("sync_ticket_status_to_worker SKIPPED (ticket_id={$ticket_id}): url_set=" . (empty($worker_url) ? 'NO' : 'YES') . ", key_set=" . (empty($internal_key) ? 'NO' : 'YES'));
+            return;
+        }
+
+        $ch = curl_init(rtrim($worker_url, '/'));
+        curl_setopt_array($ch, [
+            CURLOPT_POST => true,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT => 3,
+            CURLOPT_CONNECTTIMEOUT => 2,
+            CURLOPT_HTTPHEADER => ['Content-Type: application/json', 'X-Internal-Key: ' . $internal_key],
+            CURLOPT_POSTFIELDS => json_encode(['action' => 'sync_ticket_status', 'ticket_id' => $ticket_id, 'status' => $status], JSON_UNESCAPED_UNICODE),
+        ]);
+        $resp = curl_exec($ch);
+        $err = curl_error($ch);
+        $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+
+        if ($err) {
+            error_log("sync_ticket_status_to_worker CURL ERROR (ticket_id={$ticket_id}): {$err}");
+        } elseif ($http_code < 200 || $http_code >= 300) {
+            error_log("sync_ticket_status_to_worker FAILED (ticket_id={$ticket_id}, http_code={$http_code}): " . substr($resp, 0, 500));
+        }
+    } catch (Throwable $e) {
+        error_log('sync_ticket_status_to_worker error: ' . $e->getMessage());
+    }
+}
+
+
 function trigger_cache_rebuild($merchant_id, $merchant_username) {
     global $pdo;
     if (!$pdo) return false;
@@ -5029,6 +5070,7 @@ $params = [
                 $m_username = $_SESSION['username'] ?? get_username_by_id($pdo, $user_id);
                 sync_to_firebase($m_username, "signals/orders_updated", null, time(), 'PUT');     
                 update_order_tracking($m_username, $order_id, 'confirmed_by_store');
+                sync_ticket_status_to_worker($order_id, 'confirmed_by_store'); // ⭐ مزامنة الحالة إلى D1
                 
                 send_response('success', ['message' => 'تمت الموافقة على الطلب وجاري تجهيزه.']);
             } else {
@@ -5057,6 +5099,7 @@ $params = [
                 // تحديث جرس الإشعارات فقط
                 sync_to_firebase($m_username, "signals/orders_updated", null, time(), 'PUT');
                 update_order_tracking($m_username, $order_id, $new_status);
+                sync_ticket_status_to_worker($order_id, $new_status); // ⭐ مزامنة الحالة إلى D1
                 send_response('success',['message' => 'تم تحديث حالة الطلب بنجاح.']);
             }
             else throw new Exception("فشل تحديث الحالة.");
@@ -5104,6 +5147,7 @@ $params = [
                 // إرسال إشارة للمتصفح بجلب البيانات المحدثة
                 sync_to_firebase($m_username, "signals/orders_updated", null, time(), 'PUT');
                 update_order_tracking($m_username, $ticket_id, 'completed');
+                sync_ticket_status_to_worker($ticket_id, 'completed'); // ⭐ مزامنة الحالة إلى D1
                 
                 send_response('success',['message' => 'تم تأكيد التسليم بنجاح وتوثيق الأرباح في رصيدك!']);
                 
@@ -5521,6 +5565,7 @@ $params = [
         // 3. إرسال إشارة تنبيه للمتصفح لتحديث الواجهة عبر الـ API
                 sync_to_firebase($merchant_username, "signals/orders_updated", null, time(), 'PUT');
                 update_order_tracking($merchant_username, $order_id, 'cancelled');
+                sync_ticket_status_to_worker($order_id, 'cancelled'); // ⭐ مزامنة الحالة إلى D1
 
                 send_response('success', ['message' => 'تم إلغاء الطلب بنجاح وإعادة المنتجات للمخزون.']);
             } catch (Exception $e) {
