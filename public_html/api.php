@@ -919,8 +919,17 @@ function sync_user_to_worker($pdo, $user_id) {
             CURLOPT_HTTPHEADER => ['Content-Type: application/json', 'X-Internal-Key: ' . $internal_key],
             CURLOPT_POSTFIELDS => json_encode($payload, JSON_UNESCAPED_UNICODE),
         ]);
-        curl_exec($ch);
+        $resp = curl_exec($ch);
+        $err = curl_error($ch);
+        $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
         curl_close($ch);
+
+        // ⭐ تسجيل صريح للنتيجة — بدون هذا كنا عمياً عن أي فشل حقيقي (401/500/شبكة)
+        if ($err) {
+            error_log("sync_user_to_worker CURL ERROR (user_id={$user_id}): {$err}");
+        } elseif ($http_code < 200 || $http_code >= 300) {
+            error_log("sync_user_to_worker FAILED (user_id={$user_id}, http_code={$http_code}): " . substr($resp, 0, 500));
+        }
     } catch (Throwable $e) {
         error_log('sync_user_to_worker error: ' . $e->getMessage());
     }
@@ -965,8 +974,16 @@ function sync_customer_to_worker($pdo, $customer_id) {
             CURLOPT_HTTPHEADER => ['Content-Type: application/json', 'X-Internal-Key: ' . $internal_key],
             CURLOPT_POSTFIELDS => json_encode($payload, JSON_UNESCAPED_UNICODE),
         ]);
-        curl_exec($ch);
+        $resp = curl_exec($ch);
+        $err = curl_error($ch);
+        $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
         curl_close($ch);
+
+        if ($err) {
+            error_log("sync_customer_to_worker CURL ERROR (customer_id={$customer_id}): {$err}");
+        } elseif ($http_code < 200 || $http_code >= 300) {
+            error_log("sync_customer_to_worker FAILED (customer_id={$customer_id}, http_code={$http_code}): " . substr($resp, 0, 500));
+        }
     } catch (Throwable $e) {
         error_log('sync_customer_to_worker error: ' . $e->getMessage());
     }
