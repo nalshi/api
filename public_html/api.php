@@ -903,7 +903,7 @@ function sync_user_to_worker($pdo, $user_id) {
 
         $payload = [
             'action'     => 'sync_user',
-            'id'         => (string)$u['id'],
+            'id'         => (int)$u['id'],
             'username'   => $u['username'],
             'role'       => $u['role'],
             'store_name' => $u['store_name'],
@@ -965,7 +965,7 @@ function sync_customer_to_worker($pdo, $customer_id) {
 
         $payload = [
             'action'    => 'sync_customer',
-            'id'        => (string)$c['id'],
+            'id'        => (int)$c['id'],
             'full_name' => $c['full_name'],
             'phone'     => $c['phone'],
             'address'   => $c['address'],
