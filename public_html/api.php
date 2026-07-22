@@ -886,7 +886,10 @@ function sync_user_to_worker($pdo, $user_id) {
     try {
         $worker_url = getenv('WORKER_API_URL') ?: ($_ENV['WORKER_API_URL'] ?? '');
         $internal_key = getenv('INTERNAL_SYNC_KEY') ?: ($_ENV['INTERNAL_SYNC_KEY'] ?? '');
-        if (empty($worker_url) || empty($internal_key)) return;
+        if (empty($worker_url) || empty($internal_key)) {
+            error_log("sync_user_to_worker SKIPPED (user_id={$user_id}): url_set=" . (empty($worker_url) ? 'NO' : 'YES') . ", key_set=" . (empty($internal_key) ? 'NO' : 'YES'));
+            return;
+        }
 
         $stmt = $pdo->prepare(
             "SELECT id, username, role, store_name, phone, store_type, settings, fcm_token,
@@ -947,7 +950,10 @@ function sync_customer_to_worker($pdo, $customer_id) {
     try {
         $worker_url = getenv('WORKER_API_URL') ?: ($_ENV['WORKER_API_URL'] ?? '');
         $internal_key = getenv('INTERNAL_SYNC_KEY') ?: ($_ENV['INTERNAL_SYNC_KEY'] ?? '');
-        if (empty($worker_url) || empty($internal_key)) return;
+        if (empty($worker_url) || empty($internal_key)) {
+            error_log("sync_customer_to_worker SKIPPED (customer_id={$customer_id}): url_set=" . (empty($worker_url) ? 'NO' : 'YES') . ", key_set=" . (empty($internal_key) ? 'NO' : 'YES'));
+            return;
+        }
 
         $stmt = $pdo->prepare(
             "SELECT id, full_name, phone, address, is_active FROM customers WHERE id = ?"
