@@ -131,6 +131,7 @@ header("X-XSS-Protection: 1; mode=block");
 header("X-Content-Type-Options: nosniff"); 
 header("Strict-Transport-Security: max-age=31536000; includeSubDomains"); 
 header("Content-Security-Policy: default-src 'none';"); 
+header("Referrer-Policy: strict-origin-when-cross-origin");
 
 // =======================================================
 // 2. الدوال المساعدة والإعدادات
@@ -2615,6 +2616,10 @@ try {
             break;
 
         case 'create_order':
+            // 🔒 معطّل عمداً: إنشاء الطلبات صار حصرياً عبر الـ Worker (D1).
+            // هذا المسار القديم غير متزامن مع نظام المخزون/الطلبات الحالي، وتفعيله
+            // مجدداً قد يُنشئ طلبات "يتيمة" لا يراها التاجر ولا الزبون بشكل صحيح.
+            send_response('error', ['message' => 'هذا الإجراء لم يعد متاحاً من هنا.'], 410);
             if (!$customer_id) {
                 send_response('error', ['message' => 'يجب تسجيل الدخول أولاً لإتمام الطلب.'], 401);
             }
@@ -3208,6 +3213,8 @@ try {
             break;
 
         case 'get_orders':
+            // 🔒 معطّل عمداً: قراءة الطلبات (نشطة/مؤرشفة) صارت حصرياً عبر الـ Worker (D1).
+            send_response('error', ['message' => 'هذا الإجراء لم يعد متاحاً من هنا.'], 410);
             if (!$user_id) send_response('error',['message' => 'غير مصرح لك بالوصول'], 401);
             $filter = sanitize_input($input['filter'] ?? 'active'); 
             
@@ -5057,6 +5064,8 @@ $params = [
             break;
 
         case 'merchant_approve_order':
+            // 🔒 معطّل عمداً: موافقة التاجر على الطلب صارت عبر update_order_status بالـ Worker.
+            send_response('error', ['message' => 'هذا الإجراء لم يعد متاحاً من هنا.'], 410);
     
             if ($user_role !== 'merchant') throw new Exception("غير مصرح لك.");
             $order_id = sanitize_input($input['order_id']);
@@ -5085,6 +5094,8 @@ $params = [
             break;
 
         case 'merchant_update_order_status':
+            // 🔒 معطّل عمداً: تحديث حالة الطلب صار عبر update_order_status بالـ Worker.
+            send_response('error', ['message' => 'هذا الإجراء لم يعد متاحاً من هنا.'], 410);
             if ($user_role !== 'merchant') throw new Exception("غير مصرح.");
             $order_id = sanitize_input($input['order_id']);
             $new_status = sanitize_input($input['status']);
@@ -5106,6 +5117,8 @@ $params = [
             break;
 
         case 'merchant_confirm_delivery_code':
+            // 🔒 معطّل عمداً: تأكيد التسليم صار عبر confirm_delivery_code بالـ Worker.
+            send_response('error', ['message' => 'هذا الإجراء لم يعد متاحاً من هنا.'], 410);
             if ($user_role !== 'merchant') throw new Exception("غير مصرح لك.");
             $ticket_id = sanitize_input($input['order_id']);
             $code = sanitize_input($input['code']);
@@ -5493,6 +5506,8 @@ $params = [
             }
             break;
         case 'merchant_cancel_order':
+            // 🔒 معطّل عمداً: إلغاء الطلب صار عبر cancel_order بالـ Worker.
+            send_response('error', ['message' => 'هذا الإجراء لم يعد متاحاً من هنا.'], 410);
             if ($user_role !== 'merchant') throw new Exception("غير مصرح لك.");
             $order_id = sanitize_input($input['order_id']);
             $reason = sanitize_input($input['reason'] ?? 'تم الإلغاء من قبل التاجر');
@@ -5575,10 +5590,9 @@ $params = [
             break;
 
         case 'worker_sync_new_order':
-            // ⚠️ هذا المسار لا يُستدعى من الواجهة أبداً - فقط من الـ Worker نفسه
-            // (بعد أن ينشئ/يدمج التذكرة في D1) ليُبقي TiDB متزامنة، لأن نظام
-            // موافقة/رفض/تحديث حالة الطلب (merchant_approve_order وأخواتها) وتطبيقا
-            // المندوب والزبون لا يزالوا يقرؤون فقط من TiDB مباشرة، ولم يُنقلوا لـ D1 بعد.
+            // 🔒 معطّل عمداً (2026-07-22): لم يعد الـ Worker يستدعي هذا المسار، لأن
+            // إنشاء/إدارة الطلبات بالكامل صار على D1 مباشرة بدون كتابة موازية على TiDB.
+            send_response('error', ['message' => 'هذا الإجراء لم يعد متاحاً من هنا.'], 410);
             $sync_key_header = $_SERVER['HTTP_X_INTERNAL_KEY'] ?? '';
             $sync_expected_key = getenv('INTERNAL_SYNC_KEY') ?: ($_ENV['INTERNAL_SYNC_KEY'] ?? '');
             if (empty($sync_expected_key) || !hash_equals($sync_expected_key, $sync_key_header)) {
