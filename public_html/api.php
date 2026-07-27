@@ -617,7 +617,41 @@ function simple_php_hash($str) {
     }
     return $hash;
 }
+/**
+ * 🚀 دالة إرسال الرسائل الفورية عبر MacroDroid
+ * تقوم بتنظيف رقم الهاتف وإرسال الطلب مباشرة للسيرفر
+ */
+function send_sms_via_macrodroid($phone, $message) {
+    $macro_device_id = getenv('MACRO_DEVICE_ID') ?: ($_ENV['MACRO_DEVICE_ID'] ?? '');
+    $macro_webhook_name = getenv('MACRO_WEBHOOK_NAME') ?: ($_ENV['MACRO_WEBHOOK_NAME'] ?? '');
 
+    if (empty($macro_device_id) || empty($macro_webhook_name)) {
+        error_log("MacroDroid Error: Environment variables MACRO_DEVICE_ID or MACRO_WEBHOOK_NAME are missing.");
+        return false;
+    }
+
+    // تنظيف رقم الهاتف لضمان وصوله بشكل صحيح للجوال
+    $clean_phone = preg_replace('/[^0-9]/', '', $phone);
+    if (strpos($clean_phone, '967') === 0 && strlen($clean_phone) >= 12) {
+        $clean_phone = substr($clean_phone, 3);
+    } elseif (strpos($clean_phone, '00967') === 0) {
+        $clean_phone = substr($clean_phone, 5);
+    } elseif (strpos($clean_phone, '0') === 0 && strlen($clean_phone) == 10) {
+        $clean_phone = substr($clean_phone, 1);
+    }
+
+    $url = "https://trigger.macrodroid.com/" . $macro_device_id . "/" . $macro_webhook_name . "?phone=" . urlencode($clean_phone) . "&msg=" . urlencode($message);
+
+    $ch = curl_init();
+    curl_setopt($ch, CURLOPT_URL, $url);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 5);
+    $result = curl_exec($ch);
+    $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+
+    return ($http_code === 200);
+}
 function get_fcm_access_token() {
     $env_json = getenv('FIREBASE_CREDENTIALS_JSON') ?: $_ENV['FIREBASE_CREDENTIALS_JSON'] ?? '';
     
@@ -2248,9 +2282,7 @@ try {
                 if ($customer['is_active'] == 0) throw new Exception('عذراً، هذا الرقم محظور من استخدام المتجر.');
                 $pdo->prepare("UPDATE customers SET otp_code = ? WHERE id = ?")->execute([$otp, $customer['id']]);
 
-                try {
-                    $pdo->prepare("INSERT INTO sms_queue (phone_number, message, status) VALUES (?, ?, 'pending')")->execute([$phone, $message]);
-                } catch (PDOException $e) {}
+                send_sms_via_macrodroid($phone, $message);
 
             } else {
                 $random_pass = password_hash(bin2hex(random_bytes(8)), PASSWORD_DEFAULT);
@@ -2273,9 +2305,7 @@ try {
                 $stmt = $pdo->prepare("INSERT INTO customers (full_name, phone, password, address, is_verified, is_active, otp_code) VALUES (?, ?, ?, '', 1, 1, ?)");
                 $stmt->execute([$default_name, $phone, $random_pass, $otp]);
 
-                try {
-                    $pdo->prepare("INSERT INTO sms_queue (phone_number, message, status) VALUES (?, ?, 'pending')")->execute([$phone, $message]);
-                } catch (PDOException $e) {}
+  send_sms_via_macrodroid($phone, $message);
             }
 
             $token_payload =[
@@ -2295,8 +2325,7 @@ try {
                 'samesite' => 'None'
             ]);
             
-            $pdo->prepare("INSERT INTO rate_limits (ip_address, phone_number) VALUES (?, ?)")->execute([$ip_address, $phone]);
-
+            send_sms_via_macrodroid($phone, $message);
             send_response('success',['message' => 'تم إرسال كود التحقق بنجاح.', 'otp' => 'sent', 'phone' => $phone, 'cooldown' => OTP_COOLDOWN_SECONDS, 'state_token' => $state_token]);
             break;
 
@@ -3662,10 +3691,7 @@ try {
                 ]);
                 
                 $message = "رمز التحقق لتسجيل الدخول من جهاز جديد هو: {$otp}";
-                try { 
-                    $pdo->prepare("DELETE FROM sms_queue WHERE phone_number = ?")->execute([$phone_to_check]);
-                    $pdo->prepare("INSERT INTO sms_queue (phone_number, message) VALUES (?, ?)")->execute([$phone_to_check, $message]); 
-                } catch(PDOException $e) {}
+                send_sms_via_macrodroid($phone, $message);
                 
                 send_response('new_device_otp_required',['message' => 'تم اكتشاف محاولة دخول من جهاز جديد. يرجى إدخال رمز التحقق المرسل لجوالك.', 'state_token' => $state_token]);
             }
@@ -3853,7 +3879,7 @@ try {
             $message = "كود تفعيل حساب الشريك الخاص بك هو: {$otp}";
             
             $pdo->prepare("DELETE FROM sms_queue WHERE phone_number = ?")->execute([$phone]);
-            $pdo->prepare("INSERT INTO sms_queue (phone_number, message) VALUES (?, ?)")->execute([$phone, $message]);
+            send_sms_via_macrodroid($phone, $message);
             
             send_response('success_otp_sent', ['state_token' => $state_token]);
             break;
@@ -4158,8 +4184,7 @@ try {
             $message = "كود استعادة كلمة المرور الخاص بك هو: {$otp}";
             
             $pdo->prepare("DELETE FROM sms_queue WHERE phone_number = ?")->execute([$phone]);
-            $pdo->prepare("INSERT INTO sms_queue (phone_number, message) VALUES (?, ?)")->execute([$phone, $message]);
-            
+            send_sms_via_macrodroid($phone, $message);
             send_response('success', ['state_token' => $state_token]);
             break;
         
