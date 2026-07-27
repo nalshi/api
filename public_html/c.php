@@ -15,7 +15,7 @@ $DB_DATABASE = "v"; // ⚠️ راجع الملاحظة أعلاه — تأكد 
 // ============ لا تغيّر ما تحت هذا السطر ============
 header('Content-Type: text/plain; charset=utf-8');
 
-$tables = [];
+$tables = [v];
 
 $tables['users'] = "
 CREATE TABLE IF NOT EXISTS `users` (
