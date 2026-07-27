@@ -10,7 +10,7 @@ $DB_HOST     = "gateway01.eu-central-1.prod.aws.tidbcloud.com";
 $DB_PORT     = 4000;
 $DB_USERNAME = "G8uR7b18HrHhM4w.root";
 $DB_PASSWORD = "oVaumZm0uUSrgW0z";
-$DB_DATABASE = "nalsh"; // ⚠️ راجع الملاحظة أعلاه — تأكد إن هذا هو اسم قاعدة بياناتك الصحيح
+$DB_DATABASE = "nalsh";
 
 // ============ لا تغيّر ما تحت هذا السطر ============
 header('Content-Type: text/plain; charset=utf-8');
@@ -333,10 +333,35 @@ CREATE TABLE IF NOT EXISTS `user_favorites` (
 // ============ التنفيذ ============
 try {
     $dsn = "mysql:host={$DB_HOST};port={$DB_PORT};dbname={$DB_DATABASE};charset=utf8mb4";
-    $pdo = new PDO($dsn, $DB_USERNAME, $DB_PASSWORD, [
+
+    // TiDB Cloud (Serverless) يرفض أي اتصال غير مشفّر، فلازم نفعّل SSL هنا.
+    // نجرب أشهر مسارات شهادات CA الموجودة عادة على السيرفرات (Linux/cPanel).
+    $possibleCaBundles = [
+        '/etc/ssl/certs/ca-certificates.crt', // Debian/Ubuntu
+        '/etc/pki/tls/certs/ca-bundle.crt',    // CentOS/RHEL
+        '/etc/ssl/cert.pem',                   // بعض توزيعات cPanel/macOS
+    ];
+
+    $options = [
         PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-    ]);
-    echo "✅ تم الاتصال بنجاح بقاعدة البيانات '{$DB_DATABASE}'.\n\n";
+        PDO::MYSQL_ATTR_SSL_VERIFY_SERVER_CERT => true,
+    ];
+
+    foreach ($possibleCaBundles as $ca) {
+        if (is_readable($ca)) {
+            $options[PDO::MYSQL_ATTR_SSL_CA] = $ca;
+            break;
+        }
+    }
+
+    if (!isset($options[PDO::MYSQL_ATTR_SSL_CA])) {
+        // ما لقينا شهادة CA جاهزة على السيرفر — نفعّل SSL بدون تحقق من الشهادة
+        // (يحل مشكلة "insecure transport" لكنه أقل أمانًا؛ الأفضل رفع شهادة CA حقيقية)
+        $options[PDO::MYSQL_ATTR_SSL_VERIFY_SERVER_CERT] = false;
+    }
+
+    $pdo = new PDO($dsn, $DB_USERNAME, $DB_PASSWORD, $options);
+    echo "✅ تم الاتصال بنجاح (SSL) بقاعدة البيانات '{$DB_DATABASE}'.\n\n";
 } catch (PDOException $e) {
     die("❌ فشل الاتصال بقاعدة البيانات:\n" . $e->getMessage() . "\n");
 }
