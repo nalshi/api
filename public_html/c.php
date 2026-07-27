@@ -9,7 +9,7 @@
 $DB_HOST     = "gateway01.eu-central-1.prod.aws.tidbcloud.com";
 $DB_PORT     = 4000;
 $DB_USERNAME = "G8uR7b18HrHhM4w.root";
-$DB_PASSWORD = "Pxqrt568odAFBwdc";
+$DB_PASSWORD = "oVaumZm0uUSrgW0z";
 $DB_DATABASE = "nalsh"; // ⚠️ راجع الملاحظة أعلاه — تأكد إن هذا هو اسم قاعدة بياناتك الصحيح
 
 // ============ لا تغيّر ما تحت هذا السطر ============
