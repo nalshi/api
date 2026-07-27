@@ -10,12 +10,12 @@ $DB_HOST     = "gateway01.eu-central-1.prod.aws.tidbcloud.com";
 $DB_PORT     = 4000;
 $DB_USERNAME = "G8uR7b18HrHhM4w.root";
 $DB_PASSWORD = "Pxqrt568odAFBwdc";
-$DB_DATABASE = "v"; // ⚠️ راجع الملاحظة أعلاه — تأكد إن هذا هو اسم قاعدة بياناتك الصحيح
+$DB_DATABASE = "nalsh"; // ⚠️ راجع الملاحظة أعلاه — تأكد إن هذا هو اسم قاعدة بياناتك الصحيح
 
 // ============ لا تغيّر ما تحت هذا السطر ============
 header('Content-Type: text/plain; charset=utf-8');
 
-$tables = [v];
+$tables = [];
 
 $tables['users'] = "
 CREATE TABLE IF NOT EXISTS `users` (
