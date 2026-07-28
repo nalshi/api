@@ -5698,11 +5698,14 @@ $params = [
             $stmt_sync = $pdo->prepare("UPDATE users SET store_name = ?, store_type = ?, settings = ? WHERE id = ?");
             $stmt_sync->execute([$sync_store_name, $sync_store_type, $sync_settings_json, $sync_uid]);
 
-            // إعادة توليد info.json ورفعه لـ GitHub حتى تبقى صفحة المتجر العامة متوافقة
-            $sync_username = get_username_by_id($pdo, $sync_uid);
-            if ($sync_username && function_exists('sync_merchant_info_json')) {
-                try { sync_merchant_info_json($pdo, $sync_uid, $sync_username); } catch (Throwable $e) {}
-            }
+            // ⚠️ إصلاح: ما عاد نستدعي sync_merchant_info_json هنا. هذا المسار
+            // (worker_sync_settings) هدفه فقط إبقاء TiDB متزامنة لتطبيقي المندوب
+            // والإدارة - كتابة info.json لواجهة المتجر العامة يتكفل بها الـ Worker
+            // نفسه عبر syncStoreInfoToStorefront (بالتوازي مع هذا الطلب بالضبط).
+            // الاستدعاء القديم هنا كان يكتب نفس الملف بصيغة JSON مختلفة (مسطّحة
+            // بدون مفتاح "data") من مصدر غير متسلسل مع طابور الـ Worker، فيصير
+            // تصادم: أي كتابة توصل GitHub متأخرة تمحو حقول الكتابة الثانية بصمت -
+            // وهذا سبب ظهور اسم المتجر فقط واختفاء بقية البيانات من info.json.
 
             send_response('success', ['message' => 'تمت مزامنة الإعدادات مع TiDB بنجاح']);
             break;
