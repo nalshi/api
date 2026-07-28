@@ -113,6 +113,12 @@ if (empty($_app_secret)) {
 }
 if (!defined("APP_SECRET_KEY")) define("APP_SECRET_KEY", $_app_secret);
 
+// ⭐ إعدادات MacroDroid (بوابة إرسال SMS عبر جهاز أندرويد)
+// ⚠️ كانت هذه المتغيرات "global" بدون أي تعريف فعلي في أي مكان بالملف،
+// لذلك كان شرط !empty() يفشل دائماً ولا يُرسل أي طلب فعلياً لـ MacroDroid.
+$MACRO_DEVICE_ID    = getenv('MACRO_DEVICE_ID') ?: ($_ENV['MACRO_DEVICE_ID'] ?? '');
+$MACRO_WEBHOOK_NAME = getenv('MACRO_WEBHOOK_NAME') ?: ($_ENV['MACRO_WEBHOOK_NAME'] ?? '');
+
 // =======================================================
 // 2. إجبار استخدام HTTPS (تفعيل التشفير)
 // =======================================================
@@ -604,6 +610,51 @@ function sync_to_github($path, $data, $method = 'PUT', $commit_message = "Auto-u
     $clean_path = str_replace('.json', '', $path);
     kv_request($clean_path, $method, $method !== 'DELETE' ? $data : null);
 }
+// =======================================================
+// ⭐ نظام كود التحقق (OTP) الآمن
+// - random_int بدل rand (مولّد عشوائي آمن تشفيرياً)
+// - الكود لا يُخزَّن أبداً كنص صريح، فقط hash
+// - المقارنة بـ hash_equals لمنع ثغرات التوقيت (timing attacks)
+// =======================================================
+function generate_secure_otp() {
+    return (string) random_int(100000, 999999);
+}
+function hash_otp($otp) {
+    return hash_hmac('sha256', (string) $otp, APP_SECRET_KEY);
+}
+function verify_otp_hash($otp_input, $stored_hash) {
+    if (empty($stored_hash) || empty($otp_input)) return false;
+    return hash_equals((string) $stored_hash, hash_otp($otp_input));
+}
+
+// إرسال SMS عبر MacroDroid بأمان:
+// - بيانات الرسالة تُرسل عبر POST body بدل query string (كانت الرسالة والكود يظهران كاملين
+//   داخل الـ URL نفسه، وهذا يعرّضهما لأي سجل/لوق يحتفظ بروابط GET الكاملة).
+// - device_id / webhook_name تُقرأ من متغيرات البيئة فقط، ولا تُطبع أو تُرسل للعميل أبداً.
+function send_via_macrodroid($phone, $message) {
+    global $MACRO_DEVICE_ID, $MACRO_WEBHOOK_NAME;
+    if (empty($MACRO_DEVICE_ID) || empty($MACRO_WEBHOOK_NAME)) {
+        error_log("MacroDroid: لم يتم إرسال SMS - متغيرات البيئة MACRO_DEVICE_ID/MACRO_WEBHOOK_NAME غير مُعرَّفة.");
+        return false;
+    }
+    $url = "https://trigger.macrodroid.com/" . rawurlencode($MACRO_DEVICE_ID) . "/" . rawurlencode($MACRO_WEBHOOK_NAME);
+    $ch = curl_init($url);
+    curl_setopt($ch, CURLOPT_POST, true);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, http_build_query(['phone' => $phone, 'msg' => $message]));
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 6);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true);
+    $result = curl_exec($ch);
+    $httpcode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $err = curl_error($ch);
+    curl_close($ch);
+    if ($httpcode != 200 || $result === false) {
+        error_log("MacroDroid: فشل إرسال SMS (http=$httpcode, err=$err)");
+        return false;
+    }
+    return true;
+}
+
 function simple_php_hash($str) {
     $hash = 0;
     $len = strlen($str);
@@ -617,41 +668,7 @@ function simple_php_hash($str) {
     }
     return $hash;
 }
-/**
- * 🚀 دالة إرسال الرسائل الفورية عبر MacroDroid
- * تقوم بتنظيف رقم الهاتف وإرسال الطلب مباشرة للسيرفر
- */
-function send_sms_via_macrodroid($phone, $message) {
-    $macro_device_id = getenv('MACRO_DEVICE_ID') ?: ($_ENV['MACRO_DEVICE_ID'] ?? '');
-    $macro_webhook_name = getenv('MACRO_WEBHOOK_NAME') ?: ($_ENV['MACRO_WEBHOOK_NAME'] ?? '');
 
-    if (empty($macro_device_id) || empty($macro_webhook_name)) {
-        error_log("MacroDroid Error: Environment variables MACRO_DEVICE_ID or MACRO_WEBHOOK_NAME are missing.");
-        return false;
-    }
-
-    // تنظيف رقم الهاتف لضمان وصوله بشكل صحيح للجوال
-    $clean_phone = preg_replace('/[^0-9]/', '', $phone);
-    if (strpos($clean_phone, '967') === 0 && strlen($clean_phone) >= 12) {
-        $clean_phone = substr($clean_phone, 3);
-    } elseif (strpos($clean_phone, '00967') === 0) {
-        $clean_phone = substr($clean_phone, 5);
-    } elseif (strpos($clean_phone, '0') === 0 && strlen($clean_phone) == 10) {
-        $clean_phone = substr($clean_phone, 1);
-    }
-
-    $url = "https://trigger.macrodroid.com/" . $macro_device_id . "/" . $macro_webhook_name . "?phone=" . urlencode($clean_phone) . "&msg=" . urlencode($message);
-
-    $ch = curl_init();
-    curl_setopt($ch, CURLOPT_URL, $url);
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_TIMEOUT, 5);
-    $result = curl_exec($ch);
-    $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    curl_close($ch);
-
-    return ($http_code === 200);
-}
 function get_fcm_access_token() {
     $env_json = getenv('FIREBASE_CREDENTIALS_JSON') ?: $_ENV['FIREBASE_CREDENTIALS_JSON'] ?? '';
     
@@ -2271,7 +2288,8 @@ try {
                 }
             }
 
-            $otp = rand(100000, 999999);
+            $otp = generate_secure_otp();
+            $otp_hash = hash_otp($otp);
             $message = "كود التحقق الخاص بك هو: {$otp}\nلا تشاركه مع أحد.";
 
             $stmt = $pdo->prepare("SELECT id, is_active, full_name FROM customers WHERE phone = ?");
@@ -2280,15 +2298,18 @@ try {
             
             if ($customer) {
                 if ($customer['is_active'] == 0) throw new Exception('عذراً، هذا الرقم محظور من استخدام المتجر.');
-                $pdo->prepare("UPDATE customers SET otp_code = ? WHERE id = ?")->execute([$otp, $customer['id']]);
+                $pdo->prepare("UPDATE customers SET otp_code = ? WHERE id = ?")->execute([$otp_hash, $customer['id']]);
 
-                send_sms_via_macrodroid($phone, $message);
+                try {
+                    $pdo->prepare("INSERT INTO sms_queue (phone_number, message, status) VALUES (?, ?, 'pending')")->execute([$phone, $message]);
+                } catch (PDOException $e) {}
+                send_via_macrodroid($phone, $message);
 
             } else {
                 $random_pass = password_hash(bin2hex(random_bytes(8)), PASSWORD_DEFAULT);
                 $default_name = "عميل " . substr($phone, -4);
                 
-                try { $pdo->exec("ALTER TABLE customers ADD COLUMN otp_code VARCHAR(10) NULL AFTER phone"); } catch(Exception $e){}
+                try { $pdo->exec("ALTER TABLE customers ADD COLUMN otp_code VARCHAR(64) NULL AFTER phone"); } catch(Exception $e){}
                 try { $pdo->exec("ALTER TABLE customers ADD COLUMN is_verified TINYINT(1) DEFAULT 0 AFTER is_active"); } catch(Exception $e){}
                 try {
                     $pdo->exec("CREATE TABLE IF NOT EXISTS `sms_queue` (
@@ -2303,15 +2324,21 @@ try {
                 } catch (PDOException $e) {}
 
                 $stmt = $pdo->prepare("INSERT INTO customers (full_name, phone, password, address, is_verified, is_active, otp_code) VALUES (?, ?, ?, '', 1, 1, ?)");
-                $stmt->execute([$default_name, $phone, $random_pass, $otp]);
+                $stmt->execute([$default_name, $phone, $random_pass, $otp_hash]);
 
-  send_sms_via_macrodroid($phone, $message);
+                try {
+                    $pdo->prepare("INSERT INTO sms_queue (phone_number, message, status) VALUES (?, ?, 'pending')")->execute([$phone, $message]);
+                } catch (PDOException $e) {}
+                send_via_macrodroid($phone, $message);
             }
 
+            // ⭐ إصلاح أمني حرج: لم يعد الكود يُخزَّن داخل التوكن الموقَّع المُرسَل للعميل.
+            // التوكن كان "موقّعاً" فقط (HMAC) وليس مُشفَّراً، فأي عميل يقدر يفك base64
+            // ويقرأ الكود مباشرة من الكوكي دون انتظار الرسالة. المصدر الوحيد للتحقق الآن هو
+            // قاعدة البيانات (otp_code المُخزَّن كـ hash).
             $token_payload =[
                 'purpose' => 'customer_login',
                 'phone' => $phone,
-                'otp' => $otp,
                 'attempts' => 0
             ];
             $state_token = generate_signed_token($token_payload, 5);
@@ -2325,7 +2352,8 @@ try {
                 'samesite' => 'None'
             ]);
             
-            send_sms_via_macrodroid($phone, $message);
+            $pdo->prepare("INSERT INTO rate_limits (ip_address, phone_number) VALUES (?, ?)")->execute([$ip_address, $phone]);
+
             send_response('success',['message' => 'تم إرسال كود التحقق بنجاح.', 'otp' => 'sent', 'phone' => $phone, 'cooldown' => OTP_COOLDOWN_SECONDS, 'state_token' => $state_token]);
             break;
 
@@ -2349,11 +2377,36 @@ try {
             if (!$cust) throw new Exception('رقم الهاتف غير مسجل في النظام.');
             if ($cust['is_active'] == 0) throw new Exception('عذراً، حسابك محظور من الإدارة.');
 
-            $stmt_update = $pdo->prepare("UPDATE customers SET otp_code = NULL, is_verified = 1 WHERE id = ? AND otp_code = ?");
-            $stmt_update->execute([$cust['id'], $otp_input]);
+            // ⭐ حد لعدد المحاولات الخاطئة على نفس التوكن (يمنع تجربة كل الأكواد الممكنة)
+            $otp_attempts = (int) ($payload['attempts'] ?? 0);
+            if ($otp_attempts >= 5) {
+                throw new Exception('تجاوزت عدد المحاولات المسموح بها. يرجى طلب كود جديد.');
+            }
 
-            if ($stmt_update->rowCount() > 0 || $otp_input == $payload['otp']) {
-    
+            $stmt_otp = $pdo->prepare("SELECT otp_code FROM customers WHERE id = ?");
+            $stmt_otp->execute([$cust['id']]);
+            $otp_row = $stmt_otp->fetch(PDO::FETCH_ASSOC);
+
+            // ⭐ إصلاح أمني حرج: المقارنة الوحيدة المسموحة الآن هي مقابل الـ hash المخزَّن
+            // في قاعدة البيانات باستخدام hash_equals (آمن ضد ثغرات التوقيت). تم حذف
+            // المسار البديل القديم الذي كان يقبل الكود لو طابق قيمة داخل التوكن نفسه.
+            if (!verify_otp_hash($otp_input, $otp_row['otp_code'] ?? null)) {
+                $new_payload = $payload;
+                $new_payload['attempts'] = $otp_attempts + 1;
+                unset($new_payload['exp']);
+                $retry_token = generate_signed_token($new_payload, 5);
+                setcookie('state_token', $retry_token, [
+                    'expires' => time() + 300,
+                    'path' => '/',
+                    'domain' => '',
+                    'secure' => true,
+                    'httponly' => true,
+                    'samesite' => 'None'
+                ]);
+                throw new Exception('كود التحقق غير صحيح.');
+            }
+
+            {
                 $pdo->prepare("UPDATE customers SET otp_code = NULL, is_verified = 1 WHERE id = ?")->execute([$cust['id']]);
                 $is_new_user = (strpos($cust['full_name'], 'عميل') === 0);
 
@@ -2427,28 +2480,6 @@ try {
                     'customer' => ['full_name' => $cust['full_name'], 'phone' => $phone], 
                     'needs_profile_update' => $is_new_user
                 ]);
-            } else {
-                $payload['attempts']++;
-                if ($payload['attempts'] >= 3) {
-                    $pdo->prepare("UPDATE customers SET otp_code = NULL WHERE id = ?")->execute([$cust['id']]);
-                    setcookie('state_token', '', [
-                        'expires' => time() - 3600,
-                        'path' => '/',
-                        'secure' => true,
-                        'httponly' => true,
-                        'samesite' => 'None'
-                    ]);
-                    throw new Exception("لقد تجاوزت حد المحاولات الخاطئة (3 محاولات). يرجى طلب كود جديد.");
-                }
-                $new_token = generate_signed_token($payload, 5);
-                setcookie('state_token', $new_token, [
-                    'expires' => time() + 300,
-                    'path' => '/',
-                    'secure' => true,
-                    'httponly' => true,
-                    'samesite' => 'None'
-                ]);
-                throw new Exception('كود التحقق خاطئ. تبقى لك ' . (3 - $payload['attempts']) . ' محاولات.');
             }
             break;
 
@@ -3201,17 +3232,7 @@ try {
                             elseif (strpos($m_phone, '0') === 0 && strlen($m_phone) == 10) $m_phone = substr($m_phone, 1);
                             
                             $msg_alert = "🛍️ طلب جديد!\nمرحباً متجر {$m_info_db['store_name']}،\nلديك طلب جديد بانتظار الموافقة والتجهيز.\nرقم الطلب: " . substr($tick['ticket_id'], 0, 8);
-                            
-                            global $MACRO_DEVICE_ID, $MACRO_WEBHOOK_NAME;
-                            if (!empty($MACRO_DEVICE_ID) && !empty($MACRO_WEBHOOK_NAME)) {
-                                $url = "https://trigger.macrodroid.com/" . $MACRO_DEVICE_ID . "/" . $MACRO_WEBHOOK_NAME . "?phone=" . urlencode($m_phone) . "&msg=" . urlencode($msg_alert);
-                                $ch_push = curl_init(); 
-                                curl_setopt($ch_push, CURLOPT_URL, $url); 
-                                curl_setopt($ch_push, CURLOPT_RETURNTRANSFER, true); 
-                                curl_setopt($ch_push, CURLOPT_TIMEOUT, 1); 
-                                curl_exec($ch_push); 
-                                curl_close($ch_push);
-                            }
+                            send_via_macrodroid($m_phone, $msg_alert);
                         }
                     }
                 } catch (Exception $notif_err) {
@@ -3483,19 +3504,17 @@ try {
         case 'generate_user_otp':
             if ($user_role !== 'admin') throw new Exception("للمدير فقط");
             $customer_id_for_otp = sanitize_input($input['customer_id']);
-            $otp = rand(100000, 999999);
-            try { $pdo->exec("ALTER TABLE customers ADD COLUMN otp_code VARCHAR(10) NULL AFTER phone"); } catch (Exception $e) { }
-            $pdo->prepare("UPDATE customers SET otp_code = ? WHERE id = ?")->execute([$otp, $customer_id_for_otp]);
+            $otp = generate_secure_otp();
+            try { $pdo->exec("ALTER TABLE customers ADD COLUMN otp_code VARCHAR(64) NULL AFTER phone"); } catch (Exception $e) { }
+            $pdo->prepare("UPDATE customers SET otp_code = ? WHERE id = ?")->execute([hash_otp($otp), $customer_id_for_otp]);
             $stmt = $pdo->prepare("SELECT phone, full_name FROM customers WHERE id = ?"); $stmt->execute([$customer_id_for_otp]); $cust = $stmt->fetch(PDO::FETCH_ASSOC);
             $phone = preg_replace('/[^0-9]/', '', $cust['phone']);
             if (strpos($phone, '967') === 0 && strlen($phone) >= 12) $phone = substr($phone, 3);
             elseif (strpos($phone, '00967') === 0) $phone = substr($phone, 5);
             elseif (strpos($phone, '0') === 0 && strlen($phone) == 10) $phone = substr($phone, 1);
             $message = "مرحباً {$cust['full_name']}\nكود التفعيل الخاص بك هو: {$otp}\nلا تشاركه مع أحد.";
-            $url = "https://trigger.macrodroid.com/" . $MACRO_DEVICE_ID . "/" . $MACRO_WEBHOOK_NAME . "?phone=" . urlencode($phone) . "&msg=" . urlencode($message);
-            $ch = curl_init(); curl_setopt($ch, CURLOPT_URL, $url); curl_setopt($ch, CURLOPT_RETURNTRANSFER, true); curl_setopt($ch, CURLOPT_TIMEOUT, 6); 
-            $curl_result = curl_exec($ch); $httpcode = curl_getinfo($ch, CURLINFO_HTTP_CODE); curl_close($ch);
-            $smsMsg = ($httpcode == 200 && $curl_result !== false) ? "، جاري إرسال الـ SMS من هاتفك" : "، (ملاحظة: يبدو أن سيرفر الإرسال/الجوال متوقف، لن يتم إرسال SMS)";
+            $sms_sent = send_via_macrodroid($phone, $message);
+            $smsMsg = $sms_sent ? "، جاري إرسال الـ SMS من هاتفك" : "، (ملاحظة: يبدو أن سيرفر الإرسال/الجوال متوقف، لن يتم إرسال SMS)";
             send_response('success',['message' => 'تم توليد الكود' . $smsMsg, 'otp' => $otp, 'phone' => $phone, 'name' => $cust['full_name']]);
             break;
 
@@ -3676,9 +3695,11 @@ try {
 
             if (!$is_fully_trusted) {
                 $phone_to_check = $valid_logins[0]['phone'];
-                $otp = rand(100000, 999999);
+                $otp = generate_secure_otp();
                 
-                $token_payload =[ 'purpose' => 'new_device_login', 'phone' => $phone_to_check, 'valid_logins' => $valid_logins, 'otp' => $otp, 'attempts' => 0 ];
+                // ⭐ التوكن موقَّع (HMAC) فقط وليس مُشفَّراً، لذلك لم يعد يحمل الكود الصريح
+                // بل hash_hmac منه فقط، بحيث لا يقدر أي شخص يملك الكوكي أن يقرأ الكود بفك base64.
+                $token_payload =[ 'purpose' => 'new_device_login', 'phone' => $phone_to_check, 'valid_logins' => $valid_logins, 'otp_hash' => hash_otp($otp), 'attempts' => 0 ];
                 $state_token = generate_signed_token($token_payload, 5);
                 
                 setcookie('state_token', $state_token, [
@@ -3691,7 +3712,11 @@ try {
                 ]);
                 
                 $message = "رمز التحقق لتسجيل الدخول من جهاز جديد هو: {$otp}";
-                send_sms_via_macrodroid($phone, $message);
+                try { 
+                    $pdo->prepare("DELETE FROM sms_queue WHERE phone_number = ?")->execute([$phone_to_check]);
+                    $pdo->prepare("INSERT INTO sms_queue (phone_number, message) VALUES (?, ?)")->execute([$phone_to_check, $message]); 
+                } catch(PDOException $e) {}
+                send_via_macrodroid($phone_to_check, $message);
                 
                 send_response('new_device_otp_required',['message' => 'تم اكتشاف محاولة دخول من جهاز جديد. يرجى إدخال رمز التحقق المرسل لجوالك.', 'state_token' => $state_token]);
             }
@@ -3753,7 +3778,7 @@ try {
                 throw new Exception($e->getMessage());
             }
             
-            if ($otp_input != $payload['otp']) {
+            if (!verify_otp_hash($otp_input, $payload['otp_hash'] ?? null)) {
                 $payload['attempts']++;
                 if ($payload['attempts'] >= 3) {
                     setcookie('state_token', '', ['expires' => time() - 3600, 'path' => '/', 'secure' => $is_secure, 'httponly' => true, 'samesite' => $is_secure ? 'None' : 'Lax']);
@@ -3850,7 +3875,7 @@ try {
                 throw new Exception("هذا الرقم مسجل مسبقاً في النظام. لإضافة دور جديد (تاجر/مندوب)، يرجى تسجيل الدخول أولاً ثم إضافته من إعدادات حسابك من الداخل.");
             }
             
-            $otp = rand(100000, 999999);
+            $otp = generate_secure_otp();
             $hashed_pass = password_hash($password, PASSWORD_DEFAULT);
             
             $token_payload = [
@@ -3862,7 +3887,7 @@ try {
                 'role' => $role,
                 'location' => $location,
                 'store_type' => $store_type, 
-                'otp' => $otp,
+                'otp_hash' => hash_otp($otp),
                 'attempts' => 0
             ];
             $state_token = generate_signed_token($token_payload, 10);
@@ -3879,7 +3904,8 @@ try {
             $message = "كود تفعيل حساب الشريك الخاص بك هو: {$otp}";
             
             $pdo->prepare("DELETE FROM sms_queue WHERE phone_number = ?")->execute([$phone]);
-            send_sms_via_macrodroid($phone, $message);
+            $pdo->prepare("INSERT INTO sms_queue (phone_number, message) VALUES (?, ?)")->execute([$phone, $message]);
+            send_via_macrodroid($phone, $message);
             
             send_response('success_otp_sent', ['state_token' => $state_token]);
             break;
@@ -3896,7 +3922,7 @@ try {
 
             $is_secure = (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on') || (isset($_SERVER['HTTP_X_FORWARDED_PROTO']) && $_SERVER['HTTP_X_FORWARDED_PROTO'] === 'https');
 
-            if ($otp != $payload['otp']) {
+            if (!verify_otp_hash($otp, $payload['otp_hash'] ?? null)) {
                 $payload['attempts']++;
                 if ($payload['attempts'] >= 3) {
                     setcookie('state_token', '', ['expires' => time() - 3600, 'path' => '/', 'secure' => $is_secure, 'httponly' => true, 'samesite' => $is_secure ? 'None' : 'Lax']);
@@ -4162,12 +4188,12 @@ try {
                 throw new Exception("لقد قمت بتغيير كلمتك مؤخراً، يرجى الانتظار لحماية حسابك.");
             }
         
-            $otp = rand(100000, 999999);
+            $otp = generate_secure_otp();
             
             $token_payload =[
                 'purpose' => 'password_recovery_otp',
                 'phone' => $phone,
-                'otp' => $otp,
+                'otp_hash' => hash_otp($otp),
                 'attempts' => 0
             ];
             $state_token = generate_signed_token($token_payload, 10);
@@ -4184,7 +4210,9 @@ try {
             $message = "كود استعادة كلمة المرور الخاص بك هو: {$otp}";
             
             $pdo->prepare("DELETE FROM sms_queue WHERE phone_number = ?")->execute([$phone]);
-            send_sms_via_macrodroid($phone, $message);
+            $pdo->prepare("INSERT INTO sms_queue (phone_number, message) VALUES (?, ?)")->execute([$phone, $message]);
+            send_via_macrodroid($phone, $message);
+            
             send_response('success', ['state_token' => $state_token]);
             break;
         
@@ -4203,7 +4231,7 @@ try {
                 throw new Exception("بيانات غير متطابقة.");
             }
 
-            if ($otp_input != $payload['otp']) {
+            if (!verify_otp_hash($otp_input, $payload['otp_hash'] ?? null)) {
                 $payload['attempts']++;
                 if ($payload['attempts'] >= 3) {
                     setcookie('state_token', '', [
