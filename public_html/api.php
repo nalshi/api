@@ -1,71 +1,48 @@
 <?php
 error_log("DEPLOY_MARKER_v2026_07_22_SYNC_FIX action=" . ($_POST['action'] ?? ($_GET['action'] ?? (json_decode(file_get_contents('php://input'), true)['action'] ?? 'unknown'))));
-// =======================================================
-// ملف API الشامل (النسخة المتطورة أمنياً - الجدار الأمني 12.0)
-// ⭐ تم التحديث لدعم نظام المتاجر المتعددة (Multi-Vendor) ⭐
-// ⭐ التحديث الجديد: 
-// 1. دعم المزامنة اللحظية للمنتجات بدون تحديث الصفحة.
-// 2. إجبار المندوب والتاجر على إكمال الإعدادات الأساسية (موقع، نوع المحل).
-// 3. منع تجهيز الطلبات حتى يتم قبولها من قبل مندوب.
-// 4. حماية كاملة ومطلقة ضد ثغرات SQL Injection باستخدام الاستعلامات المجهزة.
-// 5. تم إلغاء الاعتماد على Cloudflare D1 بالكامل وتحويل كافة العمليات إلى TiDB Cloud (PDO).
-// 6. ⭐ تم إلغاء Cloudflare KV بالكامل - جميع ملفات JSON تُرفع مباشرة إلى GitHub API.
-//    ✅ كل ملف يُرفع بتوقيع HMAC-SHA256 في رسالة الـ Commit للتحقق من سلامة البيانات.
-//    ✅ بنية المسارات منظمة: stores/{username}/manifest.json, search_index.json, ...
-//    ✅ لا اعتماد على أي خدمة وسيطة - GitHub هو المصدر الوحيد للحقيقة (Single Source of Truth).
-// المسار: htdocs/public_html/api.php
-// =======================================================
 
-// 1. منع أي مخرجات عشوائية لضمان سلامة استجابة JSON
 ob_start();
 function measure_performance($element_name, $callable) {
     $start_memory = memory_get_usage();
     $start_time = microtime(true);
-    
+
     $result = $callable();
-    
+
     $end_memory = memory_get_usage();
     $end_time = microtime(true);
-    
-    $memory_used = round(($end_memory - $start_memory) / 1024, 2); // بالكيلوبايت
-    $execution_time = round(($end_time - $start_time) * 1000, 2); // بالملي ثانية
-    
-    // إنشاء رسالة واضحة مع الوقت والتاريخ
+
+    $memory_used = round(($end_memory - $start_memory) / 1024, 2);
+    $execution_time = round(($end_time - $start_time) * 1000, 2);
+
+
     $time_now = date('Y-m-d H:i:s');
     $log_message = "[$time_now] 📊 [$element_name] -> الرام: {$memory_used} KB | وقت المعالج: {$execution_time} ms\n";
-    
-    // حفظ الرسالة في ملف نصي داخل نفس المجلد
+
+
     $log_file = __DIR__ . '/performance_log.txt';
     file_put_contents($log_file, $log_message, FILE_APPEND | LOCK_EX);
 
     return $result;
 }
 
-// تنظيف دفتر اليومية إذا كبر حجمه (أكثر من 100 كيلوبايت)
 $log_file = __DIR__ . '/updates_log.txt';
 if (file_exists($log_file) && filesize($log_file) > 100000) {
-    file_put_contents($log_file, ""); // مسح الملف للبدء من جديد
+    file_put_contents($log_file, "");
 }
 
-// إعدادات إظهار الأخطاء (للإنتاج: أوقف العرض وسجل في ملف)
 ini_set('display_errors', 0);
 ini_set('log_errors', 1);
 error_reporting(E_ALL);
 
-// =======================================================
-// ⭐ الترويسات الأمنية (Security Headers & CORS & HTTPS)
-// =======================================================
 header('Content-Type: application/json; charset=utf-8');
 header("Cache-Control: no-store, no-cache, must-revalidate, max-age=0");
 
-// 1. الجدار الناري الصارم: تحديد النطاقات المسموحة فقط
 $allowed_origins = [
     'https://appi.dpdns.org',
 ];
 
 $request_origin = $_SERVER['HTTP_ORIGIN'] ?? '';
 
-// استخراج النطاق من الـ Referer إذا كان الـ Origin فارغاً
 if (empty($request_origin) && isset($_SERVER['HTTP_REFERER'])) {
     $parsed = parse_url($_SERVER['HTTP_REFERER']);
     if (isset($parsed['scheme']) && isset($parsed['host'])) {
@@ -76,8 +53,8 @@ if (empty($request_origin) && isset($_SERVER['HTTP_REFERER'])) {
 $matched_origin = '';
 
 if (!empty($request_origin)) {
-    // ⭐ إصلاح أمني: مطابقة تامة للنطاق بدلاً من مطابقة "البداية فقط"
-    // (المطابقة القديمة كانت تسمح لمواقع مثل https://nalsh.vercel.app.attacker.com بالمرور)
+
+
     foreach ($allowed_origins as $origin) {
         if (strcasecmp($request_origin, $origin) === 0) {
             $matched_origin = $request_origin;
@@ -85,7 +62,7 @@ if (!empty($request_origin)) {
         }
     }
 } else {
-    // إذا كان الوصول مباشراً عبر المتصفح
+
     $matched_origin = (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on' ? "https" : "http") . "://" . ($_SERVER['HTTP_HOST'] ?? '');
 }
 
@@ -94,13 +71,11 @@ if (empty($matched_origin)) {
     die(json_encode(['status' => 'error', 'message' => 'Access Denied: Request from an unauthorized source.']));
 }
 
-// 2. السماح للطلبات الموثوقة فقط (ديناميكياً)
 header("Access-Control-Allow-Origin: $matched_origin");
 header("Access-Control-Allow-Methods: POST, GET, OPTIONS");
 header("Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With, X-CSRF-TOKEN");
 header("Access-Control-Allow-Credentials: true");
 
-// التعامل مع طلبات OPTIONS (Preflight)
 if ($_SERVER['REQUEST_METHOD'] == 'OPTIONS') {
     http_response_code(200);
     exit();
@@ -113,73 +88,56 @@ if (empty($_app_secret)) {
 }
 if (!defined("APP_SECRET_KEY")) define("APP_SECRET_KEY", $_app_secret);
 
-// ⭐ إعدادات MacroDroid (بوابة إرسال SMS عبر جهاز أندرويد)
-// ⚠️ كانت هذه المتغيرات "global" بدون أي تعريف فعلي في أي مكان بالملف،
-// لذلك كان شرط !empty() يفشل دائماً ولا يُرسل أي طلب فعلياً لـ MacroDroid.
 $MACRO_DEVICE_ID    = getenv('MACRO_DEVICE_ID') ?: ($_ENV['MACRO_DEVICE_ID'] ?? '');
 $MACRO_WEBHOOK_NAME = getenv('MACRO_WEBHOOK_NAME') ?: ($_ENV['MACRO_WEBHOOK_NAME'] ?? '');
 
-// =======================================================
-// 2. إجبار استخدام HTTPS (تفعيل التشفير)
-// =======================================================
 $protocol = (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on' || (isset($_SERVER['HTTP_X_FORWARDED_PROTO']) && $_SERVER['HTTP_X_FORWARDED_PROTO'] === 'https')) ? 'https' : 'http';
 $host = $_SERVER['HTTP_HOST'] ?? '';
 
-// تم إضافة rf.gd للسماح للاستضافة المجانية بالعمل مؤقتاً بدون HTTPS
 if ($protocol !== 'https' && strpos($host, 'localhost') === false && strpos($host, '127.0.0.1') === false && strpos($host, 'rf.gd') === false) {
     http_response_code(403);
     echo json_encode(['status' => 'error', 'message' => 'يتطلب هذا الـ API اتصالاً آمناً (HTTPS).']);
     exit();
 }
 
-header("X-Frame-Options: DENY"); 
-header("X-XSS-Protection: 1; mode=block"); 
-header("X-Content-Type-Options: nosniff"); 
-header("Strict-Transport-Security: max-age=31536000; includeSubDomains"); 
-header("Content-Security-Policy: default-src 'none';"); 
+header("X-Frame-Options: DENY");
+header("X-XSS-Protection: 1; mode=block");
+header("X-Content-Type-Options: nosniff");
+header("Strict-Transport-Security: max-age=31536000; includeSubDomains");
+header("Content-Security-Policy: default-src 'none';");
 header("Referrer-Policy: strict-origin-when-cross-origin");
-
-// =======================================================
-// 2. الدوال المساعدة والإعدادات
-// =======================================================
 
 define('CACHE_DIR', __DIR__ . '/../cache/');
 define('CACHE_FILE', CACHE_DIR . 'products.json');
-define('CACHE_TTL', 300); 
+define('CACHE_TTL', 300);
 
-define('OTP_COOLDOWN_SECONDS', 120); 
+define('OTP_COOLDOWN_SECONDS', 120);
 
 define('DELIVERY_AGENT_MAX_ORDERS', 5);
-define('ORDER_ACCEPT_TIMEOUT_SECONDS', 1800); 
+define('ORDER_ACCEPT_TIMEOUT_SECONDS', 1800);
 
-define('ALLOWED_DELIVERY_CENTER_LAT', 15.3694); 
+define('ALLOWED_DELIVERY_CENTER_LAT', 15.3694);
 define('ALLOWED_DELIVERY_CENTER_LNG', 44.1910);
-define('MAX_ALLOWED_DELIVERY_RADIUS_KM', 30); 
+define('MAX_ALLOWED_DELIVERY_RADIUS_KM', 30);
 
 define('MIN_ALLOWED_LAT', 12.0000);
 define('MAX_ALLOWED_LAT', 19.0000);
 define('MIN_ALLOWED_LNG', 41.0000);
 define('MAX_ALLOWED_LNG', 54.0000);
 
-define('MAX_PRICE_INCREASE_PERCENTAGE', 20); // 20%
+define('MAX_PRICE_INCREASE_PERCENTAGE', 20);
 
-// دالة مساعدة لجلب اسم المستخدم بأمان تام
 function get_username_by_id($pdo, $user_id) {
     $stmt = $pdo->prepare("SELECT username FROM users WHERE id = ?");
     $stmt->execute([$user_id]);
     return $stmt->fetchColumn() ?: '';
 }
 
-// دالة مساعدة لجلب اسم المتجر بأمان تام
 function get_store_name_by_id($pdo, $user_id) {
     $stmt = $pdo->prepare("SELECT store_name FROM users WHERE id = ?");
     $stmt->execute([$user_id]);
     return $stmt->fetchColumn() ?: '';
 }
-// دالة فحص اشتراك التاجر (النسخة الآمنة والمضادة للانهيار)
-// =======================================================
-// 🚀 نظام المزامنة الفائقة مع Firebase (محمي بمتغيرات البيئة)
-// =======================================================
 
 $fb_url = getenv('FIREBASE_DB_URL') ?: $_ENV['FIREBASE_DB_URL'] ?: 'https://shiban-a2757-default-rtdb.europe-west1.firebasedatabase.app/';
 if (substr($fb_url, -1) !== '/') {
@@ -187,9 +145,6 @@ if (substr($fb_url, -1) !== '/') {
 }
 $fb_secret = getenv('FIREBASE_DB_SECRET') ?: $_ENV['FIREBASE_DB_SECRET'] ?: '';
 
-// =======================================================
-// 🚀 دالة المزامنة الشاملة مع Firebase (محمية ومطورة)
-// =======================================================
 function sync_to_firebase($merchant_username, $node, $item_id, $data, $method = 'PUT') {
     $fb_url = rtrim(getenv('FIREBASE_DB_URL') ?: $_ENV['FIREBASE_DB_URL'] ?: 'https://shiban-a2757-default-rtdb.europe-west1.firebasedatabase.app', '/');
     $fb_secret = getenv('FIREBASE_DB_SECRET') ?: $_ENV['FIREBASE_DB_SECRET'] ?: '';
@@ -206,7 +161,7 @@ function sync_to_firebase($merchant_username, $node, $item_id, $data, $method = 
     $ch = curl_init();
     curl_setopt($ch, CURLOPT_URL, $url);
     curl_setopt($ch, CURLOPT_CUSTOMREQUEST, $method);
-    
+
     if ($method !== 'DELETE') {
         $json_data = json_encode($data, JSON_UNESCAPED_UNICODE);
         curl_setopt($ch, CURLOPT_POSTFIELDS, $json_data);
@@ -214,7 +169,7 @@ function sync_to_firebase($merchant_username, $node, $item_id, $data, $method = 
             'Content-Type: application/json'
         ]);
     }
-    
+
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
     curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true);
     curl_setopt($ch, CURLOPT_TIMEOUT, 5);
@@ -226,7 +181,7 @@ function sync_to_firebase($merchant_username, $node, $item_id, $data, $method = 
         error_log("FIREBASE WRITE FAILED: URL=$url | HTTP_CODE=$http_code | RESPONSE=$response");
     }
 }
-// دالة لتسجيل علم إعادة بناء الكاش بصمت لمنع توقف النظام
+
 function flag_cache_for_rebuild($merchant_id = null) {
     global $pdo;
     if (!$pdo) return;
@@ -234,7 +189,7 @@ function flag_cache_for_rebuild($merchant_id = null) {
         $stmt = $pdo->prepare("INSERT INTO settings (setting_key, setting_value) VALUES ('cache_rebuild_pending', '1') ON DUPLICATE KEY UPDATE setting_value = '1'");
         $stmt->execute();
     } catch (Exception $e) {
-        // التجاوز بصمت لضمان عدم تأثر تجربة المستخدم
+
     }
 }
 
@@ -248,14 +203,13 @@ function generate_signed_token($payload, $expiry_minutes = 5) {
     return $base64UrlHeader . "." . $base64UrlPayload . "." . $base64UrlSignature;
 }
 
-// دالة أساسية للتعامل مع Firebase عبر REST API داخل PHP
 function fb_request($path, $method = 'GET', $data = null) {
     $fb_url = getenv('FIREBASE_DB_URL') ?: $_ENV['FIREBASE_DB_URL'] ?: 'https://shiban-a2757-default-rtdb.europe-west1.firebasedatabase.app/';
     if (substr($fb_url, -1) !== '/') $fb_url .= '/';
     $fb_secret = getenv('FIREBASE_DB_SECRET') ?: $_ENV['FIREBASE_DB_SECRET'] ?: '';
-    
+
     $url = $fb_url . ltrim($path, '/') . "?auth=" . $fb_secret;
-    
+
     $ch = curl_init($url);
     curl_setopt($ch, CURLOPT_CUSTOMREQUEST, $method);
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
@@ -268,13 +222,6 @@ function fb_request($path, $method = 'GET', $data = null) {
     return json_decode($response, true);
 }
 
-// =======================================================
-// 🚀 نظام المزامنة الآمنة والمباشرة مع GitHub API
-// ✅ بديل Cloudflare KV - جميع العمليات تمر عبر GitHub فقط
-// ✅ كل commit يحمل توقيع HMAC-SHA256 للتحقق من سلامة البيانات
-// ✅ GET يجلب الملف من raw.githubusercontent.com (سريع + مجاني)
-// ✅ PUT/DELETE يستخدم GitHub Contents API (مصادقة Bearer Token)
-// =======================================================
 function gh_get_credentials() {
     $token = getenv('GITHUB_TOKEN') ?: ($_ENV['GITHUB_TOKEN'] ?? '');
     $owner = getenv('GITHUB_REPO_OWNER') ?: ($_ENV['GITHUB_REPO_OWNER'] ?? '');
@@ -282,18 +229,6 @@ function gh_get_credentials() {
     return [$token, $owner, $repo];
 }
 
-/**
- * kv_request — واجهة متوافقة مع الكود القديم لكنها تعمل على GitHub مباشرة.
- * 
- * GET  → يجلب الملف من raw.githubusercontent.com (أسرع + لا تحتاج token للقراءة)
- * PUT  → يرفع/يحدّث الملف عبر GitHub Contents API مع توقيع HMAC في رسالة الـ Commit
- * DELETE → يحذف الملف عبر GitHub Contents API
- *
- * @param string $path   المسار النسبي مثل: stores/username/products_page_1
- * @param string $method GET | PUT | DELETE
- * @param mixed  $data   البيانات للرفع (مصفوفة أو null)
- * @return array|null    البيانات عند GET، أو null عند PUT/DELETE
- */
 function kv_request($path, $method = 'GET', $data = null) {
     [$gh_token, $gh_owner, $gh_repo] = gh_get_credentials();
 
@@ -302,7 +237,7 @@ function kv_request($path, $method = 'GET', $data = null) {
         return null;
     }
 
-    // ✅ تنظيف المسار: إزالة .json إذا أُضيفت عن طريق الخطأ
+
     $clean_path = ltrim(str_replace('.json', '', $path), '/') . '.json';
     $api_url    = "https://api.github.com/repos/{$gh_owner}/{$gh_repo}/contents/{$clean_path}";
 
@@ -314,9 +249,9 @@ function kv_request($path, $method = 'GET', $data = null) {
         "Content-Type: application/json",
     ];
 
-    // ──────────────────────────────────────────────
-    // GET: جلب الملف من raw.githubusercontent.com (أسرع وبدون token)
-    // ──────────────────────────────────────────────
+
+
+
     if ($method === 'GET') {
         $raw_url = "https://raw.githubusercontent.com/{$gh_owner}/{$gh_repo}/main/{$clean_path}";
         $ch = curl_init($raw_url);
@@ -336,15 +271,15 @@ function kv_request($path, $method = 'GET', $data = null) {
         return null;
     }
 
-    // ──────────────────────────────────────────────
-    // PUT / DELETE: يحتاج GitHub Token
-    // ──────────────────────────────────────────────
+
+
+
     if (empty($gh_token)) {
         error_log("GitHub KV: GITHUB_TOKEN مفقود - تعذّر تنفيذ {$method} على {$clean_path}");
         return null;
     }
 
-    // 1. جلب SHA الملف الحالي (مطلوب لأي تحديث أو حذف)
+
     $ch = curl_init($api_url);
     curl_setopt_array($ch, [
         CURLOPT_RETURNTRANSFER => true,
@@ -361,9 +296,9 @@ function kv_request($path, $method = 'GET', $data = null) {
         $sha = $file_meta['sha'] ?? null;
     }
 
-    // DELETE: نحتاج SHA لأي عملية حذف
+
     if ($method === 'DELETE') {
-        if (!$sha) return null; // الملف غير موجود أصلاً
+        if (!$sha) return null;
         $payload = [
             "message" => "🗑️ Auto-delete: {$clean_path}",
             "sha"     => $sha,
@@ -381,7 +316,7 @@ function kv_request($path, $method = 'GET', $data = null) {
         return null;
     }
 
-    // PUT: رفع/تحديث الملف مع توقيع HMAC لضمان سلامة البيانات
+
     $json_content  = json_encode($data, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
     $secret_key    = getenv('APP_SECRET_KEY') ?: ($_ENV['APP_SECRET_KEY'] ?? 'default_key');
     $data_signature = hash_hmac('sha256', $json_content, $secret_key);
@@ -409,13 +344,9 @@ function kv_request($path, $method = 'GET', $data = null) {
         error_log("GitHub KV PUT فشل [{$put_code}] على {$clean_path}: {$put_resp}");
     }
 
-    return null; // PUT لا يُعيد بيانات
+    return null;
 }
 
-// =======================================================
-// 🚀 دالة مساعدة داخلية: تنفيذ طلب HTTP إلى GitHub Git Database API
-// (تُستخدم فقط داخل gh_upload_multiple_files لتفادي تكرار كود cURL)
-// =======================================================
 function _gh_git_api_request($url, $method, $headers, $payload = null, $timeout = 15) {
     $ch = curl_init($url);
     $opts = [
@@ -442,22 +373,6 @@ function _gh_git_api_request($url, $method, $headers, $payload = null, $timeout 
     ];
 }
 
-/**
- * =======================================================
- * 🚀 gh_upload_multiple_files — رفع مجمّع (Batch Upload) لعدة ملفات
- * في Commit واحد فقط باستخدام GitHub Git Database API (Trees & Commits)
- * =======================================================
- * ✅ الهدف: بدلاً من عمل N طلب PUT متتالي عبر kv_request (Contents API)،
- *    نقوم بعملية واحدة تشمل: قراءة آخر Commit -> إنشاء Tree جديد يحوي
- *    كل الملفات -> إنشاء Commit واحد -> تحديث مرجع الفرع (ref) ليشير إليه.
- *    هذا يقلل عدد طلبات HTTP من N إلى ~4 طلبات ثابتة بغض النظر عن عدد
- *    الملفات، ويقلل أيضاً عدد الـ commits المسجّلة في المستودع (يمنع مشكلة Abuse من GitHub).
- *
- * @param string $merchant_username    اسم التاجر (يُستخدم لبناء المسار stores/{username}/{file}.json)
- * @param array  $files_array          مصفوفة associative: ['filename' => $data_array_or_string, ...]
- *                                     مثال: ['search_index' => [...], 'categories' => [...], 'products_page_1' => [...]]
- * @return bool  true عند نجاح كامل العملية، false عند أي فشل
- */
 function gh_upload_multiple_files($merchant_username, $files_array) {
     if (empty($files_array) || !is_array($files_array)) {
         return false;
@@ -482,9 +397,9 @@ function gh_upload_multiple_files($merchant_username, $files_array) {
     ];
 
     try {
-        // ──────────────────────────────────────────────
-        // أ) جلب الـ SHA الخاص بآخر Commit في فرع main
-        // ──────────────────────────────────────────────
+
+
+
         $ref_res = _gh_git_api_request(
             "{$api_base}/git/ref/heads/{$branch}",
             'GET',
@@ -497,8 +412,8 @@ function gh_upload_multiple_files($merchant_username, $files_array) {
         }
         $latest_commit_sha = $ref_res['body']['object']['sha'];
 
-        // نحتاج SHA الخاص بالـ Tree الأساسي (base tree) المرتبط بآخر Commit
-        // لبناء الشجرة الجديدة فوقه (بدون الحاجة لإعادة رفع كل ملفات المستودع كاملة)
+
+
         $commit_res = _gh_git_api_request(
             "{$api_base}/git/commits/{$latest_commit_sha}",
             'GET',
@@ -511,25 +426,25 @@ function gh_upload_multiple_files($merchant_username, $files_array) {
         }
         $base_tree_sha = $commit_res['body']['tree']['sha'];
 
-        // ──────────────────────────────────────────────
-        // ب) إنشاء Git Tree جديد يحتوي على كل الملفات الممرّرة في $files_array
-        // المسار لكل ملف: stores/{merchant_username}/{filename}.json
-        // ──────────────────────────────────────────────
+
+
+
+
         $tree_items = [];
 
         foreach ($files_array as $filename => $data) {
-            // تنظيف اسم الملف من امتداد .json إن وُجد لتوحيد الشكل، ثم إضافته يدوياً
+
             $clean_filename = str_replace('.json', '', $filename);
             $file_path = "stores/{$merchant_username}/{$clean_filename}.json";
 
-            // دعم تمرير بيانات جاهزة كسلسلة نصية أو كمصفوفة (يتم تحويلها JSON تلقائياً)
+
             $json_content = is_string($data)
                 ? $data
                 : json_encode($data, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
 
             $tree_items[] = [
                 "path"    => $file_path,
-                "mode"    => "100644", // ملف عادي (blob)
+                "mode"    => "100644",
                 "type"    => "blob",
                 "content" => $json_content,
             ];
@@ -551,9 +466,9 @@ function gh_upload_multiple_files($merchant_username, $files_array) {
         }
         $new_tree_sha = $tree_res['body']['sha'];
 
-        // ──────────────────────────────────────────────
-        // ج) إنشاء Commit واحد جديد يشمل هذه الشجرة الجديدة كاملة
-        // ──────────────────────────────────────────────
+
+
+
         $timestamp  = date('Y-m-d H:i:s T');
         $file_count = count($tree_items);
         $commit_message = "⚡ Batch-sync [{$merchant_username}] | {$file_count} files | {$timestamp}";
@@ -575,16 +490,16 @@ function gh_upload_multiple_files($merchant_username, $files_array) {
         }
         $new_commit_sha = $new_commit_res['body']['sha'];
 
-        // ──────────────────────────────────────────────
-        // د) تحديث مرجع الفرع (Branch Reference) ليشير إلى الـ Commit الجديد
-        // ──────────────────────────────────────────────
+
+
+
         $update_ref_res = _gh_git_api_request(
             "{$api_base}/git/refs/heads/{$branch}",
             'PATCH',
             $headers,
             [
                 "sha"   => $new_commit_sha,
-                "force" => false, // نرفض الـ force update لتفادي فقدان أي commits أخرى حدثت بالتوازي
+                "force" => false,
             ]
         );
 
@@ -601,21 +516,12 @@ function gh_upload_multiple_files($merchant_username, $files_array) {
     }
 }
 
-// =======================================================
-// 🚀 sync_to_github — wrapper للتوافق العكسي مع الكود القديم
-// ✅ يُحوِّل كل استدعاء قديم إلى kv_request الموحّدة (GitHub مباشرة)
-// =======================================================
 function sync_to_github($path, $data, $method = 'PUT', $commit_message = "Auto-update from system") {
-    // kv_request تتولى SHA + Base64 + HMAC signature + رفع GitHub داخلياً
+
     $clean_path = str_replace('.json', '', $path);
     kv_request($clean_path, $method, $method !== 'DELETE' ? $data : null);
 }
-// =======================================================
-// ⭐ نظام كود التحقق (OTP) الآمن
-// - random_int بدل rand (مولّد عشوائي آمن تشفيرياً)
-// - الكود لا يُخزَّن أبداً كنص صريح، فقط hash
-// - المقارنة بـ hash_equals لمنع ثغرات التوقيت (timing attacks)
-// =======================================================
+
 function generate_secure_otp() {
     return (string) random_int(100000, 999999);
 }
@@ -627,10 +533,16 @@ function verify_otp_hash($otp_input, $stored_hash) {
     return hash_equals((string) $stored_hash, hash_otp($otp_input));
 }
 
-// إرسال SMS عبر MacroDroid بأمان:
-// - بيانات الرسالة تُرسل عبر POST body بدل query string (كانت الرسالة والكود يظهران كاملين
-//   داخل الـ URL نفسه، وهذا يعرّضهما لأي سجل/لوق يحتفظ بروابط GET الكاملة).
-// - device_id / webhook_name تُقرأ من متغيرات البيئة فقط، ولا تُطبع أو تُرسل للعميل أبداً.
+function build_otp_message($otp, $purpose_line, $valid_minutes = 5, $greeting_name = null) {
+    $lines = ['نالش'];
+    if (!empty($greeting_name)) {
+        $lines[] = "مرحباً {$greeting_name}،";
+    }
+    $lines[] = "{$purpose_line}: {$otp}";
+    $lines[] = "صالح لمدة {$valid_minutes} دقائق. لا تشاركه مع أحد.";
+    return implode("\n", $lines);
+}
+
 function send_via_macrodroid($phone, $message) {
     global $MACRO_DEVICE_ID, $MACRO_WEBHOOK_NAME;
     if (empty($MACRO_DEVICE_ID) || empty($MACRO_WEBHOOK_NAME)) {
@@ -671,7 +583,7 @@ function simple_php_hash($str) {
 
 function get_fcm_access_token() {
     $env_json = getenv('FIREBASE_CREDENTIALS_JSON') ?: $_ENV['FIREBASE_CREDENTIALS_JSON'] ?? '';
-    
+
     if (!empty($env_json)) {
         $key_data = json_decode($env_json, true);
     } else {
@@ -707,10 +619,7 @@ function get_fcm_access_token() {
     curl_close($ch);
     return json_decode($response, true)['access_token'] ?? null;
 }
-// =======================================================
-// 🚀 نظام Cloudflare CDN Cache Purge
-// وظيفة الدالة: مسح الكاش لملفات تاجر محدد فقط لضمان التحديث اللحظي 
-// =======================================================
+
 function purge_merchant_cloudflare_cache($merchant_username, $pages_count = 1) {
     $zone_id = getenv('CLOUDFLARE_ZONE_ID') ?: ($_ENV['CLOUDFLARE_ZONE_ID'] ?? '');
     $api_token = getenv('CLOUDFLARE_API_TOKEN') ?: ($_ENV['CLOUDFLARE_API_TOKEN'] ?? '');
@@ -721,10 +630,10 @@ function purge_merchant_cloudflare_cache($merchant_username, $pages_count = 1) {
         return false;
     }
 
-    // تجهيز مسارات الملفات الخاصة بهذا التاجر فقط (يجب أن تطابق الروابط التي يطلبها الفرونت إند)
+
     $base_path = "$domain/stores/$merchant_username";
-    
-    // الملفات الأساسية التي تتحدث دائماً
+
+
     $files_to_purge = [
         "$base_path/manifest.json",
         "$base_path/search_index.json",
@@ -732,15 +641,15 @@ function purge_merchant_cloudflare_cache($merchant_username, $pages_count = 1) {
         "$base_path/info.json"
     ];
 
-    // إضافة صفحات المنتجات (لأن التاجر قد يكون لديه عدة صفحات)
+
     for ($i = 1; $i <= $pages_count; $i++) {
         $files_to_purge[] = "$base_path/products_page_{$i}.json";
     }
 
-    // إعداد طلب Cloudflare API (مسح بالروابط - مدعوم في الخطة المجانية)
-    // بحد أقصى 30 رابط في الطلب الواحد حسب قيود كلاودفلير
+
+
     $chunks = array_chunk($files_to_purge, 30);
-    
+
     $success = true;
     foreach ($chunks as $chunk) {
         $ch = curl_init("https://api.cloudflare.com/client/v4/zones/{$zone_id}/purge_cache");
@@ -748,13 +657,13 @@ function purge_merchant_cloudflare_cache($merchant_username, $pages_count = 1) {
             CURLOPT_CUSTOMREQUEST  => "POST",
             CURLOPT_POSTFIELDS     => json_encode(["files" => $chunk]),
             CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_TIMEOUT        => 3, // Timeout قصير حتى لا يعلق السيرفر
+            CURLOPT_TIMEOUT        => 3,
             CURLOPT_HTTPHEADER     => [
                 "Authorization: Bearer {$api_token}",
                 "Content-Type: application/json"
             ]
         ]);
-        
+
         $response = curl_exec($ch);
         $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
         curl_close($ch);
@@ -769,7 +678,7 @@ function purge_merchant_cloudflare_cache($merchant_username, $pages_count = 1) {
 }
 function send_silent_push_to_merchant($merchant_fcm_token, $order_id) {
     if (empty($merchant_fcm_token)) return;
-    
+
     $env_json = getenv('FIREBASE_CREDENTIALS_JSON') ?: $_ENV['FIREBASE_CREDENTIALS_JSON'] ?? '';
     if (!empty($env_json)) {
         $project_id = json_decode($env_json, true)['project_id'];
@@ -778,7 +687,7 @@ function send_silent_push_to_merchant($merchant_fcm_token, $order_id) {
         if (!file_exists($key_path)) return;
         $project_id = json_decode(file_get_contents($key_path), true)['project_id'];
     }
-    
+
     $access_token = get_fcm_access_token();
     if (!$access_token) return;
 
@@ -813,7 +722,7 @@ function send_silent_push_to_merchant($merchant_fcm_token, $order_id) {
         'Authorization: Bearer ' . $access_token,
         'Content-Type: application/json'
     ]);
-    curl_setopt($ch, CURLOPT_TIMEOUT, 2); 
+    curl_setopt($ch, CURLOPT_TIMEOUT, 2);
     $fcm_result = curl_exec($ch);
     $fcm_http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
     if (curl_errno($ch)) {
@@ -828,24 +737,24 @@ function verify_signed_token($token, $expected_purpose) {
     if (empty($token)) throw new Exception("التذكرة مفقودة. تم رفض العملية لتأمين النظام.");
     $parts = explode('.', $token);
     if (count($parts) !== 3) throw new Exception("تذكرة غير صالحة.");
-    
+
     list($header, $payload, $signature) = $parts;
     $valid_signature = hash_hmac('sha256', $header . "." . $payload, APP_SECRET_KEY, true);
     $base64UrlValidSignature = str_replace(['+', '/', '='],['-', '_', ''], base64_encode($valid_signature));
-    
+
     if (!hash_equals($base64UrlValidSignature, $signature)) {
         throw new Exception("تذكرة مزورة أو تم التلاعب بها.");
     }
-    
+
     $decoded_payload = json_decode(base64_decode(str_replace(['-', '_'],['+', '/'], $payload)), true);
     if (!$decoded_payload || !isset($decoded_payload['exp']) || time() > $decoded_payload['exp']) {
         throw new Exception("انتهت صلاحية العملية (Timeout). يرجى البدء من جديد.");
     }
-    
+
     if (!isset($decoded_payload['purpose']) || $decoded_payload['purpose'] !== $expected_purpose) {
         throw new Exception("محاولة تجاوز حالة غير مصرح بها. (State Machine Error)");
     }
-    
+
     return $decoded_payload;
 }
 
@@ -862,48 +771,31 @@ function generate_uuid() {
 function send_response($status, $data = [], $http_code = 200) {
     if (ob_get_length()) ob_clean();
     http_response_code($http_code);
-    $data = is_array($data) ? $data : []; 
+    $data = is_array($data) ? $data : [];
     echo json_encode(array_merge(['status' => $status], $data), JSON_UNESCAPED_UNICODE);
     exit();
 }
 
-/**
- * =======================================================
- * 🚀 send_response_and_continue_in_background — حيلة FastCGI معمّمة
- * =======================================================
- * ترسل استجابة JSON نهائية للعميل وتُنهي اتصال الـ HTTP فوراً (أو تُفرغ
- * المخازن قدر الإمكان في حال عدم توفر fastcgi_finish_request)، بحيث لا
- * ينتظر المتصفح أي عمليات لاحقة (مثل رفع الملفات إلى GitHub).
- *
- * ⚠️ هامة: هذه الدالة لا تستدعي exit() ولا تُنهي تنفيذ السكربت —
- * فهي تسمح للكود الذي يليها (مثل trigger_cache_rebuild) بالاستمرار
- * في العمل "في الخلفية" بعد أن يكون العميل قد استلم رده فعلياً.
- * يجب على المستدعي وضع exit() بعد آخر عملية خلفية إن أراد إيقاف التنفيذ.
- *
- * @param string $status    'success' أو 'error'
- * @param array  $data      بيانات إضافية تُدمج مع status في الاستجابة
- * @param int    $http_code كود حالة HTTP (افتراضياً 200)
- */
 function send_response_and_continue_in_background($status, $data = [], $http_code = 200) {
     $data = is_array($data) ? $data : [];
     $response_json = json_encode(array_merge(['status' => $status], $data), JSON_UNESCAPED_UNICODE);
 
-    // أ) تنظيف أي مخرجات سابقة في المخزن المؤقت (كما تفعل send_response)
+
     if (ob_get_length()) ob_clean();
     http_response_code($http_code);
     header('Content-Type: application/json; charset=utf-8');
     header('Content-Length: ' . strlen($response_json));
-    // إخبار الخادم/المتصفح أن الاتصال سيُغلق فوراً بعد هذه الاستجابة
+
     header('Connection: close');
     echo $response_json;
 
-    // ب) إنهاء الاتصال الفعلي مع العميل بأسرع طريقة متاحة على السيرفر
+
     if (function_exists('fastcgi_finish_request')) {
-        // ✅ الطريقة المثلى: متاحة عند تشغيل PHP عبر PHP-FPM (FastCGI)
+
         fastcgi_finish_request();
     } else {
-        // ✅ بديل عام لأي بيئة أخرى (Apache mod_php أو غيرها):
-        // نُفرغ كل مخازن الإخراج فوراً لإرسال البيانات ثم نغلق الجلسة
+
+
         if (session_status() === PHP_SESSION_ACTIVE) {
             session_write_close();
         }
@@ -912,29 +804,20 @@ function send_response_and_continue_in_background($status, $data = [], $http_cod
         }
         flush();
     }
-    // من هنا فصاعداً، اتصال الـ HTTP مع العميل قد انتهى فعلياً (أو أُفرغ قدر الإمكان)
-    // وأي كود يُنفَّذ بعد استدعاء هذه الدالة يعمل في الخلفية بهدوء دون أن ينتظره العميل.
+
+
 }
 
 function sanitize_input($data) {
     if (is_array($data)) {
         return array_map('sanitize_input', $data);
     }
-    // ملاحظة: لا نستخدم htmlspecialchars هنا لأن PDO يحمي من SQL Injection تلقائياً،
-    // وتطبيق htmlspecialchars على البيانات المخزنة يُشوّه النصوص العربية والرموز.
-    // يجب تطبيق htmlspecialchars عند عرض البيانات في HTML فقط.
+
+
+
     return trim($data ?? '');
 }
 
-/**
- * =======================================================
- * ⚡ sync_user_to_worker — مزامنة فورية لبيانات المستخدم إلى D1 (Cloudflare Worker)
- * =======================================================
- * تُستدعى بعد كل تسجيل دخول ناجح لضمان أن الداشبورد (الذي أصبح يعتمد على
- * الـ Worker/D1 لكل شيء عدا تسجيل الدخول) يرى دائماً أحدث بيانات المستخدم.
- * لا تُفشل تسجيل الدخول أبداً حتى لو تعذّر الاتصال بالـ Worker (best-effort،
- * بمهلة قصيرة جداً، وتُستدعى دائماً بعد إرسال الرد للمستخدم).
- */
 function sync_user_to_worker($pdo, $user_id) {
     try {
         $worker_url = getenv('WORKER_API_URL') ?: ($_ENV['WORKER_API_URL'] ?? '');
@@ -961,7 +844,7 @@ function sync_user_to_worker($pdo, $user_id) {
             'store_name' => $u['store_name'],
             'phone'      => $u['phone'],
             'store_type' => $u['store_type'],
-            'settings'   => $u['settings'], // نص JSON جاهز أصلاً من عمود settings
+            'settings'   => $u['settings'],
             'fcm_token'  => $u['fcm_token'],
             'created_at' => $u['created_at'] ? ((int)$u['created_at'] * 1000) : null,
         ];
@@ -980,7 +863,7 @@ function sync_user_to_worker($pdo, $user_id) {
         $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
         curl_close($ch);
 
-        // ⭐ تسجيل صريح للنتيجة — بدون هذا كنا عمياً عن أي فشل حقيقي (401/500/شبكة)
+
         if ($err) {
             error_log("sync_user_to_worker CURL ERROR (user_id={$user_id}): {$err}");
         } elseif ($http_code < 200 || $http_code >= 300) {
@@ -990,15 +873,7 @@ function sync_user_to_worker($pdo, $user_id) {
         error_log('sync_user_to_worker error: ' . $e->getMessage());
     }
 }
-/**
- * =======================================================
- * ⭐ إضافة (2026-07-21): sync_customer_to_worker — مزامنة فورية لبيانات
- * العميل إلى D1 (Cloudflare Worker)، بنفس نمط sync_user_to_worker تماماً.
- * تُستدعى بعد نجاح تسجيل دخول العميل (auth_verify_otp) حتى يقدر الـ Worker
- * يخدم check_customer_session و create_order و get_user_orders مباشرة
- * دون المرور على api.php. best-effort ولا تُفشل تسجيل الدخول أبداً.
- * =======================================================
- */
+
 function sync_customer_to_worker($pdo, $customer_id) {
     try {
         $worker_url = getenv('WORKER_API_URL') ?: ($_ENV['WORKER_API_URL'] ?? '');
@@ -1048,13 +923,6 @@ function sync_customer_to_worker($pdo, $customer_id) {
     }
 }
 
-/**
- * ⭐ إضافة: مزامنة عكسية لحالة التذكرة إلى D1 (الـ Worker) بعد أي تغيير نهائي على
- * حالتها في MySQL (موافقة/رفض/تحديث حالة/إلغاء/تسليم) عبر أكشنات api.php القديمة.
- * بدون هذا، تبقى نسخة D1 من التذكرة بحالتها القديمة (pending) للأبد، فيعتبرها
- * create_order بالـ Worker "تذكرة قائمة" قابلة للدمج مع طلب جديد لاحق لنفس
- * العميل/التاجر، ويُعيد إحياء طلبات مُلغاة/مكتملة بالخطأ في MySQL.
- */
 function sync_ticket_status_to_worker($ticket_id, $status) {
     try {
         $worker_url = getenv('WORKER_API_URL') ?: ($_ENV['WORKER_API_URL'] ?? '');
@@ -1088,18 +956,17 @@ function sync_ticket_status_to_worker($ticket_id, $status) {
     }
 }
 
-
 function trigger_cache_rebuild($merchant_id, $merchant_username) {
     global $pdo;
     if (!$pdo) return false;
 
     try {
-        // 1. جلب كافة المنتجات النشطة والمقبولة لهذا التاجر من TiDB Cloud
+
         $stmt = $pdo->prepare("SELECT * FROM products WHERE merchant_id = ? AND is_available = 1 AND (approval_status = 'approved' OR approval_status IS NULL OR approval_status = '')");
         $stmt->execute([$merchant_id]);
         $products = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-        // 2. جلب فئات هذا التاجر + الفئات العامة المشتركة فقط (استعلام واحد خفيف)
+
         $stmt_cats = $pdo->prepare("SELECT id, name, parent_id FROM categories WHERE user_id = ? OR user_id IS NULL ORDER BY parent_id, name");
         $stmt_cats->execute([$merchant_id]);
         $all_categories = $stmt_cats->fetchAll(PDO::FETCH_ASSOC);
@@ -1107,23 +974,23 @@ function trigger_cache_rebuild($merchant_id, $merchant_username) {
         $timestamp = round(microtime(true) * 1000);
         $PAGE_SIZE = 20;
 
-        // =======================================================
-        // ⭐ إعادة هيكلة كاملة لملفات JSON لمنع تكرار كتابة نفس بيانات
-        //    المنتج أو الفئة في أكثر من ملف:
-        //    - ملفات products_page_N.json هي المصدر الوحيد للبيانات الكاملة للمنتج
-        //      (مُخزَّنة ككائن مفهرس بمعرّف المنتج id => بياناته، وليس كمصفوفة، لسرعة
-        //      الوصول المباشر O(1) بدل البحث الخطي).
-        //    - ملف categories.json يحتوي الشجرة الكاملة للفئات (فئة داخل فئة بلا حد
-        //      للعمق عبر parent_id)، وكل فئة تحمل فقط "مرجعاً مختصراً" لكل منتج تابع لها:
-        //      {id, n: اسم مختصر, pg: رقم الصفحة} — دون تكرار وصف/سعر/صورة المنتج الكامل.
-        //    - ملف search_index.json يبقى خفيفاً جداً لغرض البحث السريع فقط (نفس المرجع
-        //      المختصر أعلاه)، ولا يكرر أي بيانات كاملة أيضاً.
-        //    النتيجة: كل منتج وكل فئة يُكتبان مرة واحدة فقط عبر كل ملفات المتجر،
-        //    ما يقلّل حجم البيانات المرفوعة لكل تحديث ويجعل بناء الكاش أسرع وأخف على السيرفر.
-        // =======================================================
 
-        $pages = [];       // pageNum => [ productId => fullProductData ]
-        $productRef = [];  // productId => ['id','n' (اسم مختصر),'pg' (رقم الصفحة),'cid' (معرّف الفئة)]
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+        $pages = [];
+        $productRef = [];
 
         $chunks = array_chunk($products, $PAGE_SIZE);
         foreach ($chunks as $index => $chunk) {
@@ -1134,7 +1001,7 @@ function trigger_cache_rebuild($merchant_id, $merchant_username) {
                 $feats = !empty($p['features']) ? (json_decode($p['features'], true) ?: []) : [];
                 $cid = !empty($p['category_id']) ? (int)$p['category_id'] : null;
 
-                // البيانات الكاملة تُكتب هنا فقط، مرة واحدة، ضمن ملف صفحتها
+
                 $pageData[$p['id']] = [
                     'id' => $p['id'],
                     'name' => $p['name'],
@@ -1151,8 +1018,8 @@ function trigger_cache_rebuild($merchant_id, $merchant_username) {
                     'is_available' => (int)($p['is_available'] ?? 1)
                 ];
 
-                // مرجع مختصر فقط (اختصار الاسم + رقم الصفحة) يُستخدم في كل من
-                // categories.json و search_index.json بدل تكرار المنتج كاملاً
+
+
                 $productRef[$p['id']] = [
                     'id' => $p['id'],
                     'n'  => mb_substr((string)$p['name'], 0, 40),
@@ -1164,7 +1031,7 @@ function trigger_cache_rebuild($merchant_id, $merchant_username) {
         }
         if (empty($pages)) $pages[1] = [];
 
-        // 3. بناء شجرة الفئات الكاملة (تدعم فئة داخل فئة داخل فئة بلا حد للعمق)
+
         $catMap = [];
         foreach ($all_categories as $c) {
             $catMap[(int)$c['id']] = [
@@ -1175,13 +1042,13 @@ function trigger_cache_rebuild($merchant_id, $merchant_username) {
                 'children' => [],
             ];
         }
-        // ربط كل منتج بفئته عبر مرجعه المختصر فقط (بدون تكرار بياناته الكاملة)
+
         foreach ($productRef as $ref) {
             if ($ref['cid'] && isset($catMap[$ref['cid']])) {
                 $catMap[$ref['cid']]['products'][] = ['id' => $ref['id'], 'n' => $ref['n'], 'pg' => $ref['pg']];
             }
         }
-        // ترتيب الفئات هرمياً: كل فئة تُدرَج داخل مصفوفة "children" الخاصة بأبيها
+
         $catRoots = [];
         foreach ($catMap as $id => &$node) {
             if ($node['parent_id'] && isset($catMap[$node['parent_id']])) {
@@ -1197,7 +1064,7 @@ function trigger_cache_rebuild($merchant_id, $merchant_username) {
             'data' => $catRoots
         ];
 
-        // 4. كشاف بحث خفيف جداً: نفس المرجع المختصر فقط (id + اسم + رقم صفحة)
+
         $searchIndex = [
             '_version' => $timestamp,
             'data' => array_values(array_map(function($r) {
@@ -1212,12 +1079,12 @@ function trigger_cache_rebuild($merchant_id, $merchant_username) {
             'pages' => []
         ];
 
-        // =======================================================
-        // 5. ⭐ تجميع كل الملفات (search_index + categories + صفحات المنتجات + manifest)
-        //    في مصفوفة واحدة، ثم رفعها بـ Commit واحد فقط عبر
-        //    gh_upload_multiple_files (بدلاً من استدعاء kv_request عدة مرات
-        //    داخل foreach، وهو ما كان يسبب طلبات HTTP متتالية وبطيئة).
-        // =======================================================
+
+
+
+
+
+
         $files_to_upload = [];
 
         $files_to_upload['search_index'] = $searchIndex;
@@ -1228,13 +1095,13 @@ function trigger_cache_rebuild($merchant_id, $merchant_username) {
                 '_version' => $timestamp,
                 'page' => $pageNum,
                 'total_pages' => count($pages),
-                'data' => $pageData // كائن مفهرس بمعرّف المنتج، وليس مصفوفة
+                'data' => $pageData
             ];
             $files_to_upload["products_page_{$pageNum}"] = $pagePayload;
             $manifestVersions['pages']["page_{$pageNum}"] = $timestamp;
         }
 
-        // 6. إضافة ملف المانيفست النهائي إلى نفس دفعة الرفع
+
         $manifestPayload = [
             'version' => $timestamp,
             'total_products' => count($products),
@@ -1243,16 +1110,16 @@ function trigger_cache_rebuild($merchant_id, $merchant_username) {
         ];
         $files_to_upload['manifest'] = $manifestPayload;
 
-        // 7. ⭐ استدعاء واحد فقط لرفع جميع الملفات دفعة واحدة (Batch Upload)
+
         $upload_ok = gh_upload_multiple_files($merchant_username, $files_to_upload);
 
         if (!$upload_ok) {
             error_log("Batch upload إلى GitHub فشل للتاجر: {$merchant_username}");
         }
 
-        // =======================================================
-        // ⭐ مسح كاش Cloudflare لهذا التاجر فقط (يبقى كما هو دون تغيير)
-        // =======================================================
+
+
+
         $total_pages = count($pages) ?: 1;
         purge_merchant_cloudflare_cache($merchant_username, $total_pages);
 
@@ -1278,7 +1145,7 @@ function validate_image_upload($file) {
     if ($file['size'] === 0) {
         return "الملف المرفوع فارغ.";
     }
-    $max_size = 2 * 1024 * 1024; // 2MB
+    $max_size = 2 * 1024 * 1024;
     if ($file['size'] > $max_size) {
         return "حجم الملف كبير جداً. الحد الأقصى المسموح به هو 2 ميجابايت.";
     }
@@ -1304,44 +1171,86 @@ function is_safe_image_url($url) {
     return true;
 }
 
+function is_shortened_maps_url($url) {
+    return (bool) preg_match('/(maps\.app\.goo\.gl|goo\.gl\/maps|goo\.gl|g\.co\/maps|g\.co)/i', $url);
+}
+
+function resolve_redirect_url($url) {
+    $ch = curl_init($url);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_HEADER, false);
+    curl_setopt($ch, CURLOPT_NOBODY, true);
+    curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+    curl_setopt($ch, CURLOPT_MAXREDIRS, 10);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 6);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true);
+    curl_setopt($ch, CURLOPT_USERAGENT, 'Mozilla/5.0 (compatible; NalshBot/1.0)');
+    curl_exec($ch);
+    $final_url = curl_getinfo($ch, CURLINFO_EFFECTIVE_URL);
+    $err = curl_error($ch);
+    curl_close($ch);
+    if ($err) {
+        error_log("resolve_redirect_url: فشل تتبع الرابط المختصر ($url): $err");
+        return $url;
+    }
+    return $final_url ?: $url;
+}
+
 function extract_coords_from_url($url) {
     if (!$url) return null;
-    if (preg_match('/@?(-?\d+\.\d+),(-?\d+\.\d+)/', $url, $matches)) {
-        return['lat' => (float)$matches[1], 'lng' => (float)$matches[2]];
+
+
+    if (is_shortened_maps_url($url)) {
+        $url = resolve_redirect_url($url);
     }
-    if (preg_match('/q=(-?\d+\.\d+),(-?\d+\.\d+)/', $url, $matches)) {
-        return['lat' => (float)$matches[1], 'lng' => (float)$matches[2]];
+
+
+    if (preg_match('/@(-?\d{1,3}\.\d+),(-?\d{1,3}\.\d+)/', $url, $matches)) {
+        return ['lat' => (float)$matches[1], 'lng' => (float)$matches[2]];
     }
+
+    if (preg_match('/[?&]q=(-?\d{1,3}\.\d+),(-?\d{1,3}\.\d+)/', $url, $matches)) {
+        return ['lat' => (float)$matches[1], 'lng' => (float)$matches[2]];
+    }
+
+    if (preg_match('/[?&]ll=(-?\d{1,3}\.\d+),(-?\d{1,3}\.\d+)/', $url, $matches)) {
+        return ['lat' => (float)$matches[1], 'lng' => (float)$matches[2]];
+    }
+
+    if (preg_match('/!3d(-?\d{1,3}\.\d+)!4d(-?\d{1,3}\.\d+)/', $url, $matches)) {
+        return ['lat' => (float)$matches[1], 'lng' => (float)$matches[2]];
+    }
+
+    if (preg_match('/(-?\d{1,3}\.\d+),\s*(-?\d{1,3}\.\d+)/', $url, $matches)) {
+        return ['lat' => (float)$matches[1], 'lng' => (float)$matches[2]];
+    }
+
     return null;
 }
 
-/**
- * update_kv_manifest — تحديث ملف manifest.json على GitHub مباشرة.
- * يجلب المانيفست الحالي أولاً لدمج الـ files معه قبل الرفع.
- */
 function update_kv_manifest($merchant_username) {
     $timestamp = round(microtime(true) * 1000);
 
-    // جلب المانيفست الحالي من GitHub (إن وجد) لدمج البيانات
+
     $current = kv_request("stores/$merchant_username/manifest", 'GET') ?: [];
 
     $current['version']   = $timestamp;
     $current['updated_at'] = date('Y-m-d H:i:s');
 
-    // رفع المانيفست المحدّث مباشرة إلى GitHub
+
     kv_request("stores/$merchant_username/manifest", 'PUT', $current);
 }
 
 function is_valid_gps_location($url) {
     $coords = extract_coords_from_url($url);
-    if (!$coords) return false; 
-    
+    if (!$coords) return false;
+
     $lat = $coords['lat'];
     $lng = $coords['lng'];
-    
+
     if ($lat < MIN_ALLOWED_LAT || $lat > MAX_ALLOWED_LAT) return false;
     if ($lng < MIN_ALLOWED_LNG || $lng > MAX_ALLOWED_LNG) return false;
-    
+
     return true;
 }
 
@@ -1363,20 +1272,17 @@ function update_order_tracking($merchant_username, $order_id, $status) {
 }
 
 function calculate_delivery_fee($distance_km) {
-    $base_fee = 300; // السعر الأساسي الثابت
-    $fee_per_km = 100; // السعر لكل كيلومتر
-    $rounding_factor = 50; // التقريب لأقرب 50 ريال لتجنب الكسور في الحساب
-    
-    // حساب الإجمالي: (300) + (المسافة * 100)
+    $base_fee = 300;
+    $fee_per_km = 100;
+    $rounding_factor = 50;
+
+
     $total_fee = $base_fee + ($distance_km * $fee_per_km);
-    
-    // تقريب الرقم النهائي (مثلاً 520 تصبح 550)
+
+
     return ceil($total_fee / $rounding_factor) * $rounding_factor;
 }
-/**
- * sync_merchant_info_json — مزامنة بيانات المتجر إلى GitHub مباشرة.
- * ✅ لا يوجد Cloudflare KV — GitHub هو المصدر الوحيد.
- */
+
 function sync_merchant_info_json($pdo, $user_id, $merchant_username) {
     $stmt = $pdo->prepare("SELECT store_name, store_type, phone, settings FROM users WHERE id = ?");
     $stmt->execute([$user_id]);
@@ -1397,11 +1303,11 @@ function sync_merchant_info_json($pdo, $user_id, $merchant_username) {
         'settings'   => $settings,
     ];
 
-    // 1. رفع info.json مباشرة إلى GitHub عبر kv_request (الموحّدة)
+
     kv_request("stores/$merchant_username/info", 'PUT', $info_data);
 
-    // 2. تحديث المانيفست على GitHub
-    // 2. تحديث المانيفست على GitHub
+
+
     $manifest_path = "stores/$merchant_username/manifest";
     $current_manifest = kv_request($manifest_path, 'GET') ?: [];
 
@@ -1410,18 +1316,18 @@ function sync_merchant_info_json($pdo, $user_id, $merchant_username) {
     $current_manifest['files']['info'] = $timestamp;
 
     kv_request($manifest_path, 'PUT', $current_manifest);
-    
-    // ⭐ مسح الكاش لملف info فقط بعد تحديثه
-    purge_merchant_cloudflare_cache($merchant_username, 0); // 0 يعني لا تمسح صفحات المنتجات
+
+
+    purge_merchant_cloudflare_cache($merchant_username, 0);
 }
 function reassign_stale_orders($pdo) {
     try {
         $pdo->beginTransaction();
-        
+
         $timeout_seconds = ORDER_ACCEPT_TIMEOUT_SECONDS;
         $stale_orders_stmt = $pdo->prepare(
-            "SELECT id, delivery_agent_id FROM orders 
-             WHERE status = 'accepted_by_delivery' 
+            "SELECT id, delivery_agent_id FROM orders
+             WHERE status = 'accepted_by_delivery'
              AND accepted_at < NOW() - INTERVAL ? SECOND"
         );
         $stale_orders_stmt->execute([$timeout_seconds]);
@@ -1431,12 +1337,12 @@ function reassign_stale_orders($pdo) {
             $agent_ids_to_strike = array_map(function($order) {
                 return ['agent_id' => $order['delivery_agent_id'], 'order_id' => $order['id']];
             }, $stale_orders);
-            
+
             $strike_stmt = $pdo->prepare("INSERT INTO delivery_agent_strikes (agent_id, order_id, strike_type) VALUES (?, ?, 'accept_timeout')");
             foreach ($agent_ids_to_strike as $strike) {
                 $strike_stmt->execute([$strike['agent_id'], $strike['order_id']]);
             }
-            
+
             $order_ids_to_reset = array_column($stale_orders, 'id');
             if (!empty($order_ids_to_reset)) {
                 $placeholders = implode(',', array_fill(0, count($order_ids_to_reset), '?'));
@@ -1446,14 +1352,14 @@ function reassign_stale_orders($pdo) {
         }
 
         $dispatch_stmt = $pdo->prepare(
-            "SELECT id, dispatch_queue FROM orders 
-             WHERE status = 'pending_delivery_acceptance' 
-             AND exclusive_agent_id IS NOT NULL 
+            "SELECT id, dispatch_queue FROM orders
+             WHERE status = 'pending_delivery_acceptance'
+             AND exclusive_agent_id IS NOT NULL
              AND exclusive_until <= NOW()"
         );
         $dispatch_stmt->execute();
         $stale_dispatches = $dispatch_stmt->fetchAll(PDO::FETCH_ASSOC);
-        
+
         foreach ($stale_dispatches as $dispatch) {
             $queue = json_decode($dispatch['dispatch_queue'], true) ?:[];
             if (count($queue) > 0) {
@@ -1478,11 +1384,6 @@ function push_update_to_clients($topic, $data) {
     return;
 }
 
-// ✅ يبحث عن فئة (باسمها وأبيها) ضمن فئات هذا التاجر أو الفئات العامة المشتركة، وإن لم توجد ينشئها.
-//    مصمّمة عمداً لتكون "مقاومة للأعطال": بعض قواعد البيانات قد يكون فيها قيد تفرّد (UNIQUE)
-//    قديم على (name, parent_id) فقط دون user_id — ما قد يسبب فشل الإدخال إن استخدم تاجرٌ آخر
-//    نفس اسم الفئة من قبل. بدل أن يفشل نشر المنتج بالكامل برسالة "خطأ في قاعدة البيانات"،
-//    نلتقط هذا التعارض ونعيد استخدام أي فئة مطابقة موجودة فعلاً بدلاً من ذلك.
 function resolve_or_create_category($pdo, $name, $parent_id, $user_id) {
     $stmt_find = $pdo->prepare("SELECT id FROM categories WHERE name = ? AND parent_id = ? AND (user_id = ? OR user_id IS NULL) LIMIT 1");
     $stmt_find->execute([$name, $parent_id, $user_id]);
@@ -1494,13 +1395,13 @@ function resolve_or_create_category($pdo, $name, $parent_id, $user_id) {
         $stmt_ins->execute([$name, $parent_id, $user_id, round(microtime(true) * 1000)]);
         return (int)$pdo->lastInsertId();
     } catch (PDOException $e) {
-        // تعارض غير متوقع (مثل قيد تفرّد لا يأخذ user_id بعين الاعتبار) — لا نفشل نشر المنتج،
-        // بل نستخدم أي فئة مطابقة موجودة فعلاً في قاعدة البيانات بنفس الاسم والأب.
+
+
         $stmt_fallback = $pdo->prepare("SELECT id FROM categories WHERE name = ? AND parent_id = ? LIMIT 1");
         $stmt_fallback->execute([$name, $parent_id]);
         $fallback_id = $stmt_fallback->fetchColumn();
         if ($fallback_id) return (int)$fallback_id;
-        throw $e; // لم نجد أي بديل مناسب — أعد رمي الاستثناء الأصلي
+        throw $e;
     }
 }
 
@@ -1509,7 +1410,7 @@ function get_full_category_paths($pdo) {
         $stmt = $pdo->query("SELECT id, name, parent_id FROM categories ORDER BY parent_id, name");
         $categories = $stmt->fetchAll(PDO::FETCH_ASSOC);
         $paths = [];
-        
+
         foreach ($categories as $cat) {
             if ($cat['parent_id'] == 0 || is_null($cat['parent_id'])) {
                 $paths[$cat['id']] = $cat['name'];
@@ -1524,12 +1425,6 @@ function get_full_category_paths($pdo) {
     }
 }
 
-// دالة جديدة لبناء شجرة الفئات
-// ✅ ترجع قائمة "مسطّحة" (flat) وليست متداخلة، لأن الواجهة الأمامية تبني الشجرة بنفسها
-//    من خلال حقل parent_id لكل عنصر. إرجاع بنية متداخلة (children) كان يسبب اختفاء أي
-//    فئة أعمق من المستوى الأول (فئة داخل فئة داخل فئة) من قوائم الاختيار في لوحة التاجر.
-// ✅ تُفلتر النتائج بحيث يرى كل تاجر فئاته الخاصة فقط + الفئات العامة المشتركة
-//    (user_id = NULL)، ولا يرى فئات تاجر آخر إطلاقاً.
 function build_category_tree($pdo, $user_id = null) {
     try {
         if ($user_id) {
@@ -1556,21 +1451,18 @@ register_shutdown_function(function() {
     $error = error_get_last();
     if ($error && ($error['type'] === E_ERROR || $error['type'] === E_PARSE)) {
         if (ob_get_length()) ob_clean();
-        http_response_code(500); 
+        http_response_code(500);
         echo json_encode([
-            'status' => 'error', 
+            'status' => 'error',
             'message' => 'عطل فادح: ' . $error['message'] . ' في السطر ' . $error['line']
         ], JSON_UNESCAPED_UNICODE);
     }
 });
 
-// =======================================================
-// 3. الاتصال بقاعدة البيانات ومعالجة الطلب
-// =======================================================
 try {
     require_once (__DIR__) . '/nalsh-user-admin-name.php';
-    
-    // إنشاء وتهيئة الهيكل الموحد لجدول المنتجات في TiDB لضمان استقرار العمليات دون الحاجة لـ D1
+
+
     try {
         $pdo->exec("CREATE TABLE IF NOT EXISTS `products` (
             `id` VARCHAR(100) PRIMARY KEY,
@@ -1597,13 +1489,13 @@ try {
             INDEX `merchant_idx` (`merchant_id`)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;");
 
-        // ⭐ إصلاح جذري ثانٍ: CREATE TABLE IF NOT EXISTS لا يفعل شيئاً إن كان الجدول
-        //    "products" موجوداً بالفعل من نسخة سابقة للنظام لا تحتوي على أعمدة أُضيفت
-        //    لاحقاً (مثل category_id، approval_status، isAvailable...). في هذه الحالة
-        //    أي استعلام INSERT/UPDATE/SELECT يذكر هذه الأعمدة يفشل بخطأ
-        //    "Unknown column" ويظهر للتاجر كرسالة عامة "حدث خطأ في قاعدة البيانات".
-        //    الحل: نتأكد من وجود كل عمود مطلوب ونضيفه إن كان ناقصاً، بأمان تام
-        //    (كل عملية معزولة بـ try/catch حتى لا تتوقف البقية إن كان العمود موجوداً أصلاً).
+
+
+
+
+
+
+
         $products_columns_to_ensure = [
             "description"     => "ALTER TABLE products ADD COLUMN description TEXT",
             "cost_price"      => "ALTER TABLE products ADD COLUMN cost_price DECIMAL(10,2) DEFAULT 0",
@@ -1630,11 +1522,11 @@ try {
             $pdo->exec("ALTER TABLE products ADD INDEX category_idx (category_id)");
         } catch (Exception $e) {}
 
-        // ⭐ إصلاح جذري: إنشاء جدول الفئات categories إن لم يكن موجوداً إطلاقاً.
-        //    (هذا هو السبب الأساسي لرسالة "حدث خطأ في قاعدة البيانات" عند إضافة منتج
-        //    أو استخدام الفئات: كانت أوامر SELECT/INSERT على جدول categories تفشل لأن
-        //    الجدول نفسه غير موجود في قاعدة البيانات، فيلتقطها catch(PDOException)
-        //    في نهاية الملف ويحوّلها لرسالة عامة دون تفاصيل).
+
+
+
+
+
         $pdo->exec("CREATE TABLE IF NOT EXISTS `categories` (
             `id` INT AUTO_INCREMENT PRIMARY KEY,
             `name` VARCHAR(150) NOT NULL,
@@ -1646,7 +1538,7 @@ try {
             UNIQUE KEY `uniq_name_parent_user` (`name`, `parent_id`, `user_id`)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;");
 
-        // إضافة الأعمدة المطلوبة إن كان الجدول موجوداً مسبقاً بنسخة قديمة ناقصة الأعمدة
+
         try {
             $pdo->exec("ALTER TABLE categories ADD COLUMN parent_id INT DEFAULT 0");
         } catch (Exception $e) {}
@@ -1670,13 +1562,13 @@ try {
     $user_role = null;
 
     $exempted_actions = [
-        'get_initial_data', 'check_store_updates', 'get_public_products', 
-        'auth_request_otp', 'auth_verify_otp', 'check_customer_session', 
+        'get_initial_data', 'check_store_updates', 'get_public_products',
+        'auth_request_otp', 'auth_verify_otp', 'check_customer_session',
         'login', 'check_phone', 'register_init', 'register_verify',
         'select_role', 'verify_new_device_otp', 'resend_device_otp',
         'recover_init', 'recover_check_otp', 'recover_set_password', 'build_cache_cron',
-        'worker_sync_settings', // نداء داخلي من الـ Worker فقط، محمي بمفتاح X-Internal-Key بدلاً من JWT
-        'worker_sync_new_order', // ⭐ نداء داخلي من الـ Worker بعد إنشاء/دمج طلب في D1، محمي بنفس المفتاح
+        'worker_sync_settings',
+        'worker_sync_new_order',
     ];
 
     $auth_header = $_SERVER['HTTP_AUTHORIZATION'] ?? $_SERVER['Authorization'] ?? '';
@@ -1685,22 +1577,22 @@ try {
     }
 
     if (!empty($auth_header)) {
-        try {  // <====== قُم بإضافة هذا السطر هنا
-// APP_SECRET_KEY مُعرَّف بالفعل عند بداية الملف عبر متغيرات البيئة
+        try {
+
             list($type, $token) = explode(' ', $auth_header, 2);
             if (strcasecmp($type, 'Bearer') == 0 && !empty($token)) {
-                $token_parts = explode('.', $token); // ✅ إصلاح: تعريف $token_parts قبل استخدامه
+                $token_parts = explode('.', $token);
                 if (count($token_parts) === 3) {
-                    // APP_SECRET_KEY مُعرَّف بالفعل عند بداية الملف عبر متغيرات البيئة
+
                     list($header_enc, $payload_encoded, $signature_enc) = $token_parts;
                     $expected_sig = hash_hmac('sha256', "$header_enc.$payload_encoded", APP_SECRET_KEY, true);
-                    
+
                     $expected_sig_b64url = str_replace(['+', '/', '='], ['-', '_', ''], base64_encode($expected_sig));
-                    
+
                     if (hash_equals($signature_enc, $expected_sig_b64url) || hash_equals(base64_decode($signature_enc), $expected_sig)) {
                         $b64_payload = str_replace(['-', '_'], ['+', '/'], $payload_encoded);
                         $payload = json_decode(base64_decode($b64_payload), true);
-                        
+
                         if ($payload && isset($payload['exp']) && $payload['exp'] > time()) {
                             if (isset($payload['role']) && $payload['role'] === 'customer') {
                                 $customer_id = $payload['customer_id'];
@@ -1720,7 +1612,7 @@ try {
                 }
             }
         } catch (Exception $e) {
-            // تجاهل الخطأ - نظام التحقق من القفل بالأسفل سيتصرف
+
         }
     }
 
@@ -1736,16 +1628,16 @@ try {
     if (strpos($_SERVER['HTTP_HOST'], 'localhost') !== false || strpos($_SERVER['HTTP_HOST'], '127.0.0.1') !== false) {
         $is_secure_cookie = false;
     }
-    
-    // ⭐ إدارة الجلسات الصارمة (سنة كاملة لتجنب الخروج التلقائي المزعج)
-    $idle_timeout = 315360000; 
-    $absolute_timeout = 315360000; 
+
+
+    $idle_timeout = 315360000;
+    $absolute_timeout = 315360000;
 
     if (isset($_SESSION['user_id']) || isset($_SESSION['customer_id'])) {
         if (!isset($_SESSION['session_created_at'])) {
             $_SESSION['session_created_at'] = time();
         } elseif (time() - $_SESSION['session_created_at'] > $absolute_timeout) {
-            session_unset(); 
+            session_unset();
             session_destroy();
             setcookie('device_token', '', time() - 3600, '/');
             setcookie('remember_me_customer', '', time() - 3600, '/');
@@ -1753,15 +1645,15 @@ try {
         }
 
         if (isset($_SESSION['last_active_time']) && (time() - $_SESSION['last_active_time'] > $idle_timeout)) {
-            session_unset(); 
+            session_unset();
             session_destroy();
             send_response('error',['message' => 'تم تسجيل خروجك تلقائياً بسبب عدم النشاط لفترة طويلة.'], 401);
         }
         $_SESSION['last_active_time'] = time();
     }
 
-    define('MAX_REQUESTS_PER_MINUTE', 60); 
-    define('TIME_PERIOD_SECONDS', 60);     
+    define('MAX_REQUESTS_PER_MINUTE', 60);
+    define('TIME_PERIOD_SECONDS', 60);
 
     $user_ip = $_SERVER['REMOTE_ADDR'];
 
@@ -1788,7 +1680,7 @@ try {
             INDEX (`device_token`)
         ) ENGINE=InnoDB;");
     } catch (PDOException $e) {}
-    
+
     try {
         $pdo->exec("CREATE TABLE IF NOT EXISTS `idempotency_keys` (
             `id` INT AUTO_INCREMENT PRIMARY KEY,
@@ -1800,7 +1692,7 @@ try {
         ) ENGINE=InnoDB;");
         $pdo->exec("DELETE FROM idempotency_keys WHERE created_at < NOW() - INTERVAL 1 DAY");
     } catch (PDOException $e) {}
-    
+
     try {
         $pdo->exec("DELETE FROM api_requests WHERE request_time < NOW() - INTERVAL " . TIME_PERIOD_SECONDS . " SECOND");
         $stmt_count = $pdo->prepare("SELECT COUNT(*) FROM api_requests WHERE ip_address = ?");
@@ -1816,27 +1708,27 @@ try {
     }
     header('X-New-CSRF-Token: ' . $_SESSION['csrf_token']);
 
-    // =======================================================
-    // ⭐ نظام الحماية الذكي: الاعتماد على التوكن وإلغاء الـ CSRF
-    // =======================================================
+
+
+
     if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $is_jwt_authenticated = ($customer_id !== null || $user_id !== null);
 
         if (!$is_jwt_authenticated) {
             $token_from_session = $_SESSION['csrf_token'] ?? null;
             $token_from_header = $_SERVER['HTTP_X_CSRF_TOKEN'] ?? null;
-            
+
             if (empty($token_from_session) || empty($token_from_header) || !hash_equals((string)$token_from_session, (string)$token_from_header)) {
                 $exempt_actions =[
                     'auth_request_otp', 'auth_verify_otp', 'check_customer_session', 'get_initial_data',
                     'login', 'check_phone', 'select_role', 'verify_new_device_otp',
                     'register_init', 'register_verify', 'recover_init', 'recover_check_otp', 'recover_set_password'
                 ];
-                
+
                 if (!in_array($action, $exempt_actions) && (isset($_SESSION['user_id']) || isset($_SESSION['customer_id']))) {
                     header('X-New-CSRF-Token: ' . $token_from_session);
                     send_response('error', [
-                        'message' => 'انتهت صلاحية الصفحة. يرجى تحديث الصفحة (Refresh).', 
+                        'message' => 'انتهت صلاحية الصفحة. يرجى تحديث الصفحة (Refresh).',
                         'error_type' => 'csrf_mismatch'
                     ], 403);
                 }
@@ -1873,25 +1765,25 @@ try {
     $user_id = $user_id ?? $_SESSION['user_id'] ?? null;
     $customer_id = $customer_id ?? $_SESSION['customer_id'] ?? null;
 
-    // التقاط الـ Token من الـ Payload إذا كان موجوداً
+
     $jwt_device_token = null;
     if (isset($payload) && is_array($payload) && isset($payload['device_token'])) {
         $jwt_device_token = $payload['device_token'];
     }
 
     if ($user_id && in_array($user_role,['merchant', 'delivery', 'admin'])) {
-        // الاعتماد على الكوكي، وإذا لم يوجد نأخذه من الـ JWT Token
+
         $current_device_token = $_COOKIE['device_token'] ?? $jwt_device_token;
-        
-        // حفظه في الجلسة لاستخدامه عند تغيير الباسورد
+
+
         if ($current_device_token) $_SESSION['current_device_token'] = $current_device_token;
 
         if (empty($current_device_token)) {
-            // طرد مباشر: يمنع أي محاولة دخول بدون بصمة الجهاز
+
             session_unset(); session_destroy();
             send_response('error',['message' => 'جلسة غير صالحة أو غير مكتملة. يرجى إعادة تسجيل الدخول.'], 401);
         } else {
-            // التحقق الصارم والإجباري من قاعدة البيانات في كل طلب
+
             $stmt_check_dev = $pdo->prepare("SELECT id FROM trusted_devices WHERE user_id = ? AND device_token = ?");
             $stmt_check_dev->execute([$user_id, $current_device_token]);
             if (!$stmt_check_dev->fetchColumn()) {
@@ -1924,9 +1816,9 @@ try {
         send_response('error',['message' => 'تغيرت الجلسة في نافذة أخرى. يرجى إعادة تسجيل الدخول.'], 401);
     }
 
-    // =======================================================
-    // 4. توجيه الطلبات (API Router)
-    // =======================================================
+
+
+
 
     switch ($action) {
         case 'get_firebase_config':
@@ -1946,7 +1838,7 @@ try {
         case 'upload_image':
             if (!$user_id) send_response('error', ['message' => 'غير مصرح'], 401);
             if (isset($_FILES['image_data']) && $_FILES['image_data']['error'] === UPLOAD_ERR_OK) {
-                // ⭐ مراجعة أمنية: التحقق من نوع وحجم الملف قبل رفعه
+
                 $validation_result = validate_image_upload($_FILES['image_data']);
                 if ($validation_result !== true) {
                     throw new Exception($validation_result);
@@ -1954,10 +1846,10 @@ try {
 
                 $env_keys = getenv('IMGBB_KEYS') ?: $_ENV['IMGBB_KEYS'] ?? '';
                 if (empty($env_keys)) throw new Exception("مفتاح السيرفر مفقود.");
-                
+
                 $keys_array = array_map('trim', explode(',', $env_keys));
                 $api_key = $keys_array[array_rand($keys_array)];
-                
+
                 $ch = curl_init();
                 curl_setopt($ch, CURLOPT_URL, "https://api.imgbb.com/1/upload?key=" . $api_key);
                 curl_setopt($ch, CURLOPT_POST, true);
@@ -1967,7 +1859,7 @@ try {
                 curl_setopt($ch, CURLOPT_POSTFIELDS, ['image' => new CURLFile($_FILES['image_data']['tmp_name'], $mime, $filename)]);
                 $result = json_decode(curl_exec($ch), true);
                 curl_close($ch);
-                
+
                 if ($result && isset($result['data']['url'])) {
                     send_response('success', ['url' => $result['data']['url']]);
                 } else {
@@ -1976,8 +1868,8 @@ try {
             }
             throw new Exception("لم يتم استلام أي صورة صالحة.");
             break;
-// --- باقات الاشتراك الذكية للتجار ---
-        
+
+
         case 'save_fcm_token':
             if (!$user_id) send_response('error', ['message' => 'غير مصرح'], 401);
             $fcm_token = sanitize_input($input['fcm_token'] ?? '');
@@ -1985,7 +1877,7 @@ try {
                 $pdo->prepare("UPDATE users SET fcm_token = ? WHERE id = ?")->execute([$fcm_token, $user_id]);
             }
             send_response('success');
-            break;    
+            break;
 
         case 'verify_cart_live':
             $cart_items = $input['items'] ?? [];
@@ -2000,12 +1892,12 @@ try {
                 $size_id = $item['size_id'] ?? null;
                 $db_item = null;
 
-                // ⭐ جلب بيانات المنتج والكمية مباشرة من TiDB Cloud
+
                 $stmt_check = $pdo->prepare("SELECT price, quantity, quantity_type, is_available, discount, options FROM products WHERE id = ?");
                 $stmt_check->execute([$product_id]);
                 $db_item = $stmt_check->fetch(PDO::FETCH_ASSOC);
 
-                // الدعم العكسي للمنتجات القديمة المخزنة بنمط Listings
+
                 if (!$db_item) {
                     $stmt_check = $pdo->prepare("SELECT l.merchant_price as price, l.quantity, l.quantity_type, l.is_available, p.discount, p.sizes as options FROM merchant_listings l JOIN products p ON l.global_product_id = p.id WHERE l.id = ? OR p.id = ?");
                     $stmt_check->execute([$product_id, $product_id]);
@@ -2015,14 +1907,14 @@ try {
                 if (!$db_item || $db_item['is_available'] == 0) {
                     $changes[] = "المنتج '{$item['name']}' نفد أو تم إخفاؤه. تم حذفه من سلتك.";
                     $can_proceed = false;
-                    continue; 
+                    continue;
                 }
 
                 $available_qty = (int)$db_item['quantity'];
                 $qty_type = $db_item['quantity_type'];
                 $base_price = (float)$db_item['price'];
 
-                // فحص المقاسات والخيارات (إن وجدت) داخل قاعدة البيانات الحية
+
                 if ($size_id && !empty($db_item['options'])) {
                     $options = json_decode($db_item['options'], true) ?: [];
                     $found_opt = false;
@@ -2048,7 +1940,7 @@ try {
                     }
                 }
 
-                // حساب السعر النهائي بعد الخصم
+
                 $real_price = $base_price * (1 - ($db_item['discount'] / 100));
                 if (abs((float)$real_price - (float)$item['price']) > 1) {
                     $changes[] = "تغير سعر '{$item['name']}' من {$item['price']} إلى {$real_price}.";
@@ -2056,11 +1948,11 @@ try {
                     $can_proceed = false;
                 }
 
-                // الفحص الصارم للكمية المطلوبة
+
                 if ($qty_type === 'tracked' && $available_qty < $item['qty']) {
                     $changes[] = "الكمية المتاحة من '{$item['name']}' هي {$available_qty} فقط.";
                     $item['qty'] = $available_qty;
-                    if ($item['qty'] <= 0) continue; 
+                    if ($item['qty'] <= 0) continue;
                     $can_proceed = false;
                 }
 
@@ -2073,9 +1965,9 @@ try {
                 'new_cart' => $new_cart
             ]);
             break;
-// 1. التاجر يرسل رقم العملية من لوحة التحكم
- // 1. التاجر يرسل رقم العملية (بدون أن نثق بالمبلغ الذي يحدده هو)
-        
+
+
+
         case 'get_initial_data':
             $stmt_settings = $pdo->query("SELECT setting_value FROM settings WHERE setting_key = 'store_settings'");
             $settings = json_decode($stmt_settings->fetchColumn() ?: '{}', true);
@@ -2108,8 +2000,8 @@ try {
                 $product['user_id'] = $product['merchant_id'] ?? null;
                 $product['currency'] = $product['currency'] ?? 'YER';
             }
-            
-            unset($product); 
+
+            unset($product);
 
             send_response('success', [
                 'settings' => $settings,
@@ -2125,14 +2017,14 @@ try {
             $stmt->execute([$user_id]);
             $u = $stmt->fetch(PDO::FETCH_ASSOC);
             $settings = json_decode($u['settings'] ?: '{}', true);
-            
+
             $incomplete = [];
             if (empty($u['store_name'])) $incomplete[] = 'store_name';
             if ($u['role'] === 'merchant') {
                 if (empty($u['store_type'])) $incomplete[] = 'store_type';
                 if (empty($settings['location'])) $incomplete[] = 'location';
             }
-            
+
             send_response('success', ['is_complete' => count($incomplete) === 0, 'missing' => $incomplete]);
             break;
 
@@ -2146,7 +2038,7 @@ try {
             $limit = max(1, min(50, intval($input['limit'] ?? 20)));
             $offset = ($page - 1) * $limit;
             $category = sanitize_input($input['category'] ?? null);
-            $merchant_id = sanitize_input($input['merchant_id'] ?? null); 
+            $merchant_id = sanitize_input($input['merchant_id'] ?? null);
 
             $where_clauses =[
                 "l.is_available = 1",
@@ -2165,7 +2057,7 @@ try {
                     $params[':category'] = $category;
                 }
             }
-            
+
             if ($merchant_id) {
                 $where_clauses[] = "l.merchant_id = :merchant_id";
                 $params[':merchant_id'] = $merchant_id;
@@ -2175,7 +2067,7 @@ try {
             $base_query = " FROM merchant_listings l JOIN products p ON l.global_product_id = p.id JOIN users u ON l.merchant_id = u.id LEFT JOIN categories c ON p.category_id = c.id WHERE $where_sql";
 
             $sql_all = "SELECT p.id, p.name, SUBSTRING(p.mainDescription, 1, 120) as mainDescription, p.image, p.sizes, p.category_id, c.name as type, p.department, p.base_price, l.id as listing_id, l.merchant_price, l.quantity, l.quantity_type, u.id as merchant_id, u.store_name as merchant_name, u.store_type $base_query ORDER BY l.updated_at DESC LIMIT :limit OFFSET :offset";
-            
+
             $stmt = $pdo->prepare($sql_all);
             foreach ($params as $key => &$val) { $stmt->bindParam($key, $val); }
             $stmt->bindParam(':limit', $limit, PDO::PARAM_INT);
@@ -2217,7 +2109,7 @@ try {
                     throw new Exception("فشل التحقق الأمني (4).");
                 }
                 list($start_time, $tap_time, $nonce) = $payload_parts;
-                
+
                 if (!is_numeric($start_time) || !is_numeric($tap_time) || empty($nonce)) {
                     throw new Exception("فشل التحقق الأمني (5).");
                 }
@@ -2233,13 +2125,13 @@ try {
                 }
 
                 $challenge_duration = $tap_time - $start_time;
-                $required_duration = 2000; 
-                $allowed_window = 400;    
+                $required_duration = 2000;
+                $allowed_window = 400;
 
                 if ($challenge_duration < ($required_duration - $allowed_window) || $challenge_duration > ($required_duration + $allowed_window)) {
                     throw new Exception("فشل التحقق من التوقيت. محاولة آلية محتملة.");
                 }
-                
+
                 if (!isset($_SESSION['seen_proofs'])) $_SESSION['seen_proofs'] =[];
                 $_SESSION['seen_proofs'] = array_filter($_SESSION['seen_proofs'], function($ts) { return time() - $ts < 120; });
                 if (isset($_SESSION['seen_proofs'][$nonce])) {
@@ -2255,7 +2147,7 @@ try {
             $phone = preg_replace('/[^0-9]/', '', $input['phone'] ?? '');
 
             if (strlen($phone) < 9) throw new Exception('رقم الهاتف غير صحيح.');
-            
+
             try {
                 $pdo->exec("CREATE TABLE IF NOT EXISTS `rate_limits` (
                     `id` INT AUTO_INCREMENT PRIMARY KEY,
@@ -2270,11 +2162,11 @@ try {
 
             $pdo->exec("DELETE FROM rate_limits WHERE request_time < NOW() - INTERVAL 15 MINUTE");
 
-            // ⭐ تعديل أمني: حساب وقت الكولداون مسبقاً وتمريره كقيمة في استعلام مجهز لتفادي أخطاء المحركات وتأمين المدخلات
+
             $cooldown_time = date('Y-m-d H:i:s', time() - OTP_COOLDOWN_SECONDS);
             $check_stmt = $pdo->prepare(
-                "SELECT request_time FROM rate_limits 
-                 WHERE (ip_address = :ip OR phone_number = :phone) AND request_time > :cooldown_time 
+                "SELECT request_time FROM rate_limits
+                 WHERE (ip_address = :ip OR phone_number = :phone) AND request_time > :cooldown_time
                  ORDER BY request_time DESC LIMIT 1"
             );
             $check_stmt->execute([':ip' => $ip_address, ':phone' => $phone, ':cooldown_time' => $cooldown_time]);
@@ -2290,12 +2182,12 @@ try {
 
             $otp = generate_secure_otp();
             $otp_hash = hash_otp($otp);
-            $message = "كود التحقق الخاص بك هو: {$otp}\nلا تشاركه مع أحد.";
+            $message = build_otp_message($otp, 'كود تسجيل الدخول', 5);
 
             $stmt = $pdo->prepare("SELECT id, is_active, full_name FROM customers WHERE phone = ?");
             $stmt->execute([$phone]);
             $customer = $stmt->fetch(PDO::FETCH_ASSOC);
-            
+
             if ($customer) {
                 if ($customer['is_active'] == 0) throw new Exception('عذراً، هذا الرقم محظور من استخدام المتجر.');
                 $pdo->prepare("UPDATE customers SET otp_code = ? WHERE id = ?")->execute([$otp_hash, $customer['id']]);
@@ -2308,7 +2200,7 @@ try {
             } else {
                 $random_pass = password_hash(bin2hex(random_bytes(8)), PASSWORD_DEFAULT);
                 $default_name = "عميل " . substr($phone, -4);
-                
+
                 try { $pdo->exec("ALTER TABLE customers ADD COLUMN otp_code VARCHAR(64) NULL AFTER phone"); } catch(Exception $e){}
                 try { $pdo->exec("ALTER TABLE customers ADD COLUMN is_verified TINYINT(1) DEFAULT 0 AFTER is_active"); } catch(Exception $e){}
                 try {
@@ -2332,17 +2224,17 @@ try {
                 send_via_macrodroid($phone, $message);
             }
 
-            // ⭐ إصلاح أمني حرج: لم يعد الكود يُخزَّن داخل التوكن الموقَّع المُرسَل للعميل.
-            // التوكن كان "موقّعاً" فقط (HMAC) وليس مُشفَّراً، فأي عميل يقدر يفك base64
-            // ويقرأ الكود مباشرة من الكوكي دون انتظار الرسالة. المصدر الوحيد للتحقق الآن هو
-            // قاعدة البيانات (otp_code المُخزَّن كـ hash).
+
+
+
+
             $token_payload =[
                 'purpose' => 'customer_login',
                 'phone' => $phone,
                 'attempts' => 0
             ];
             $state_token = generate_signed_token($token_payload, 5);
-            
+
             setcookie('state_token', $state_token, [
                 'expires' => time() + 300,
                 'path' => '/',
@@ -2351,7 +2243,7 @@ try {
                 'httponly' => true,
                 'samesite' => 'None'
             ]);
-            
+
             $pdo->prepare("INSERT INTO rate_limits (ip_address, phone_number) VALUES (?, ?)")->execute([$ip_address, $phone]);
 
             send_response('success',['message' => 'تم إرسال كود التحقق بنجاح.', 'otp' => 'sent', 'phone' => $phone, 'cooldown' => OTP_COOLDOWN_SECONDS, 'state_token' => $state_token]);
@@ -2360,7 +2252,7 @@ try {
         case 'auth_verify_otp':
             $otp_input = sanitize_input($input['otp'] ?? '');
             $token = $input['state_token'] ?? $_COOKIE['state_token'] ?? '';
-            
+
             try {
                 $payload = verify_signed_token($token, 'customer_login');
             } catch (Exception $e) {
@@ -2377,7 +2269,7 @@ try {
             if (!$cust) throw new Exception('رقم الهاتف غير مسجل في النظام.');
             if ($cust['is_active'] == 0) throw new Exception('عذراً، حسابك محظور من الإدارة.');
 
-            // ⭐ حد لعدد المحاولات الخاطئة على نفس التوكن (يمنع تجربة كل الأكواد الممكنة)
+
             $otp_attempts = (int) ($payload['attempts'] ?? 0);
             if ($otp_attempts >= 5) {
                 throw new Exception('تجاوزت عدد المحاولات المسموح بها. يرجى طلب كود جديد.');
@@ -2387,9 +2279,9 @@ try {
             $stmt_otp->execute([$cust['id']]);
             $otp_row = $stmt_otp->fetch(PDO::FETCH_ASSOC);
 
-            // ⭐ إصلاح أمني حرج: المقارنة الوحيدة المسموحة الآن هي مقابل الـ hash المخزَّن
-            // في قاعدة البيانات باستخدام hash_equals (آمن ضد ثغرات التوقيت). تم حذف
-            // المسار البديل القديم الذي كان يقبل الكود لو طابق قيمة داخل التوكن نفسه.
+
+
+
             if (!verify_otp_hash($otp_input, $otp_row['otp_code'] ?? null)) {
                 $new_payload = $payload;
                 $new_payload['attempts'] = $otp_attempts + 1;
@@ -2410,14 +2302,14 @@ try {
                 $pdo->prepare("UPDATE customers SET otp_code = NULL, is_verified = 1 WHERE id = ?")->execute([$cust['id']]);
                 $is_new_user = (strpos($cust['full_name'], 'عميل') === 0);
 
-                session_regenerate_id(true); 
+                session_regenerate_id(true);
 
                 $_SESSION['customer_id'] = $cust['id'];
                 $_SESSION['customer_name'] = $cust['full_name'];
                 $_SESSION['loggedin'] = true;
-                
+
                 $is_secure_cookie = (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on') || (isset($_SERVER['HTTP_X_FORWARDED_PROTO']) && $_SERVER['HTTP_X_FORWARDED_PROTO'] === 'https');
-                
+
                 setcookie('state_token', '', [
                     'expires' => time() - 3600,
                     'path' => '/',
@@ -2430,54 +2322,54 @@ try {
                 try {
                     $pdo->prepare("DELETE FROM auth_tokens WHERE user_id = ?")->execute([$cust['id']]);
                     $selector = bin2hex(random_bytes(16)); $validator = bin2hex(random_bytes(32)); $hashed_validator = hash('sha256', $validator);
-                    $expires = date('Y-m-d H:i:s', time() + (86400 * 60)); 
+                    $expires = date('Y-m-d H:i:s', time() + (86400 * 60));
                     $pdo->prepare("INSERT INTO auth_tokens (selector, hashed_validator, user_id, expires) VALUES (?, ?, ?, ?)")->execute([$selector, $hashed_validator, $cust['id'], $expires]);
-                    
+
                     setcookie('remember_me_customer', $selector . ':' . $validator,[
                         'expires' => time() + (86400 * 60),
                         'path' => '/',
                         'domain' => '',
-                        'secure' => $is_secure_cookie, 
+                        'secure' => $is_secure_cookie,
                         'httponly' => true,
-                        'samesite' => $is_secure_cookie ? 'None' : 'Lax' 
+                        'samesite' => $is_secure_cookie ? 'None' : 'Lax'
                     ]);
                 } catch (PDOException $token_error) {}
-                
+
                 $payload_token = [
                     'customer_id' => $cust['id'],
-                    // ⭐ إضافة (2026-07-21): الـ Worker (Cloudflare) يرفض أي توكن بدون
-                    // user_id صراحة (security/auth.js). العملاء تاريخياً يستخدمون
-                    // customer_id فقط، فنضيف user_id كنسخة مطابقة له حتى تصير
-                    // توكنات العملاء صالحة للمصادقة على الـ Worker أيضاً، دون أي
-                    // تأثير على أي كود قديم بـ api.php (لأنه ما يزال يقرأ customer_id
-                    // كما هو تماماً).
+
+
+
+
+
+
                     'user_id' => $cust['id'],
                     'customer_name' => $cust['full_name'],
                     'role' => 'customer'
                 ];
-                // APP_SECRET_KEY مُعرَّف بالفعل عند بداية الملف عبر متغيرات البيئة
-                $customer_jwt_token = generate_signed_token($payload_token, 527040); // ⭐ أكثر من سنة (366 يوم) بدل 30 يوم
+
+                $customer_jwt_token = generate_signed_token($payload_token, 527040);
 
                 session_write_close();
 
-                // ⭐ تصحيح (2026-07-21): نقلنا المزامنة إلى D1 لتصير *قبل* إرسال الرد
-                // وليس بعده. السبب: send_response_and_continue_in_background تعتمد على
-                // fastcgi_finish_request()، وهي تقنية خاصة بـ PHP-FPM فقط. على منصات
-                // استضافة مُدارة مثل Render (اللي ما تستخدم بالضرورة PHP-FPM بنفس
-                // الإعداد)، دالة fastcgi_finish_request قد لا تكون متاحة، فيدخل الكود
-                // بالمسار البديل (flush فقط) اللي لا يضمن استمرار تنفيذ PHP فعلياً
-                // بعد إغلاق الاتصال مع العميل — والنتيجة عملياً أن sync_customer_to_worker
-                // لا تُنفَّذ إطلاقاً على الإنتاج رغم عدم وجود أي خطأ ظاهر (لأنها best-effort
-                // ومغلّفة بـ try/catch). لتفادي هذا نهائياً، نستدعيها الآن بشكل متزامن
-                // (تضيف ~100-300ms على رد تسجيل الدخول) قبل إرسال التوكن للعميل، حتى
-                // تكون بيانات العميل موجودة في D1 بشكل مضمون قبل أي استدعاء لاحق فوري
-                // لـ check_customer_session من الواجهة.
+
+
+
+
+
+
+
+
+
+
+
+
                 sync_customer_to_worker($pdo, $cust['id']);
 
                 send_response('success',[
-                    'message' => 'تم تسجيل الدخول بنجاح!', 
-                    'token' => $customer_jwt_token, 
-                    'customer' => ['full_name' => $cust['full_name'], 'phone' => $phone], 
+                    'message' => 'تم تسجيل الدخول بنجاح!',
+                    'token' => $customer_jwt_token,
+                    'customer' => ['full_name' => $cust['full_name'], 'phone' => $phone],
                     'needs_profile_update' => $is_new_user
                 ]);
             }
@@ -2490,45 +2382,45 @@ try {
                 $stmt = $pdo->prepare("SELECT id, full_name, phone, address, is_active FROM customers WHERE id = ?");
                 $stmt->execute([$target_id]);
                 $customer_data = $stmt->fetch(PDO::FETCH_ASSOC);
-                
+
                 if ($customer_data && (!isset($customer_data['is_active']) || $customer_data['is_active'] == 1)) {
                     $is_new_user = (strpos($customer_data['full_name'], 'عميل') === 0);
                     send_response('success', [
-                        'loggedIn' => true, 
-                        'customer' => $customer_data, 
+                        'loggedIn' => true,
+                        'customer' => $customer_data,
                         'needs_profile_update' => $is_new_user
                     ]);
                 }
             }
-            
+
             send_response('success', ['loggedIn' => false]);
             break;
-        
+
         case 'update_customer_name_only':
             if (!$customer_id) throw new Exception("يرجى تسجيل الدخول");
             $name = sanitize_input($input['name'] ?? '');
             if (empty($name) || strpos($name, 'عميل') === 0 || mb_strlen($name) < 3) throw new Exception("يرجى إدخال اسمك الحقيقي.");
-            
+
             $pdo->prepare("UPDATE customers SET full_name = ? WHERE id = ?")->execute([$name, $customer_id]);
             $_SESSION['customer_name'] = $name;
             send_response('success',['message' => 'تم حفظ الاسم بنجاح']);
-            break;            
+            break;
 
         case 'update_customer_profile':
             if (!$customer_id) throw new Exception("يرجى تسجيل الدخول");
-            
+
             $allowed_fields =['name', 'gps', 'description'];
             $safe_input = filter_allowed_keys($input, $allowed_fields);
 
-            $name = sanitize_input($safe_input['name'] ?? ''); 
-            $gps = sanitize_input($safe_input['gps'] ?? ''); 
+            $name = sanitize_input($safe_input['name'] ?? '');
+            $gps = sanitize_input($safe_input['gps'] ?? '');
             $desc = sanitize_input($safe_input['description'] ?? '');
 
             if (empty($name) || strpos($name, 'عميل') === 0) throw new Exception("يرجى إدخال اسمك الحقيقي.");
             if (empty($gps) || strpos($gps, 'http') === false) throw new Exception("يرجى تحديد موقعك الصحيح على الخريطة.");
             if (!is_valid_gps_location($gps)) throw new Exception("الموقع المحدد غير صالح أو يقع خارج النطاق الجغرافي المسموح به لخدماتنا.");
             if (empty($desc) || strlen($desc) < 4) throw new Exception("يرجى إدخال وصف دقيق للموقع ليتمكن المندوب من الوصول إليك.");
-            
+
             $full_address = "رابط الموقع: $gps | التفاصيل: $desc";
             $pdo->prepare("UPDATE customers SET full_name = ?, address = ? WHERE id = ?")->execute([$name, $full_address, $customer_id]);
             $_SESSION['customer_name'] = $name;
@@ -2537,38 +2429,38 @@ try {
 
         case 'get_user_data':
             if (!$customer_id) send_response('error',['message' => 'غير مسجل دخول'], 401);
-            
-            $sql = "SELECT c.id, c.product_id, c.listing_id, c.merchant_id, c.size_id, c.quantity, 
-                           p.name, p.price, p.discount, p.image, p.sizes, 
-                           u.store_name as merchant_name 
-                    FROM user_cart c 
-                    JOIN products p ON c.product_id = p.id 
-                    LEFT JOIN users u ON c.merchant_id = u.id 
+
+            $sql = "SELECT c.id, c.product_id, c.listing_id, c.merchant_id, c.size_id, c.quantity,
+                           p.name, p.price, p.discount, p.image, p.sizes,
+                           u.store_name as merchant_name
+                    FROM user_cart c
+                    JOIN products p ON c.product_id = p.id
+                    LEFT JOIN users u ON c.merchant_id = u.id
                     WHERE c.customer_id = ?";
-                    
-            $stmt = $pdo->prepare($sql); 
-            $stmt->execute([$customer_id]); 
+
+            $stmt = $pdo->prepare($sql);
+            $stmt->execute([$customer_id]);
             $cart_items = $stmt->fetchAll(PDO::FETCH_ASSOC);
-            
+
             foreach ($cart_items as &$item) {
                 if ($item['size_id'] && $item['sizes']) {
                     $options_data = json_decode($item['sizes'], true);
                     if (is_array($options_data)) {
                         foreach ($options_data as $option) {
                             if (isset($option['id']) && $option['id'] === $item['size_id']) {
-                                $item['size_name'] = $option['name'] ?? ($option['size_name'] ?? ''); 
-                                $item['size_image'] = $option['image'] ?? null; 
+                                $item['size_name'] = $option['name'] ?? ($option['size_name'] ?? '');
+                                $item['size_image'] = $option['image'] ?? null;
                                 break;
                             }
                         }
                     }
-                } 
+                }
                 unset($item['sizes']);
             }
-            
-            $fav = $pdo->prepare("SELECT product_id FROM user_favorites WHERE customer_id = ?"); 
+
+            $fav = $pdo->prepare("SELECT product_id FROM user_favorites WHERE customer_id = ?");
             $fav->execute([$customer_id]);
-            
+
             send_response('success',['cart' => $cart_items, 'favorites' => $fav->fetchAll(PDO::FETCH_COLUMN)]);
             break;
 
@@ -2576,20 +2468,20 @@ try {
             if (!$customer_id) send_response('error',['message' => 'يجب تسجيل الدخول أولاً'], 401);
 
             $listing_id = sanitize_input($input['listing_id'] ?? '');
-            $product_id = sanitize_input($input['product_id'] ?? $listing_id); // الاعتماد على الـ ID العالمي
+            $product_id = sanitize_input($input['product_id'] ?? $listing_id);
             $quantity = max(1, intval($input['quantity'] ?? 1));
             $size_id = sanitize_input($input['sizeId'] ?? null);
 
             if (empty($product_id)) {
                 throw new Exception("معرّف المنتج غير صالح.");
             }
-            
-            // ⭐ استعلام مباشر من قاعدة بيانات TiDB Cloud لجلب التفاصيل اللحظية
+
+
             $stmt_check = $pdo->prepare("SELECT merchant_id, id as global_product_id, quantity, quantity_type, is_available, options FROM products WHERE id = ?");
             $stmt_check->execute([$product_id]);
             $listing = $stmt_check->fetch(PDO::FETCH_ASSOC);
 
-            // الدعم العكسي للمنتجات القديمة ومنتجات الكتالوج
+
             if (!$listing) {
                 $stmt_check = $pdo->prepare("SELECT l.merchant_id, p.id as global_product_id, l.quantity, l.quantity_type, l.is_available, p.sizes as options FROM merchant_listings l JOIN products p ON l.global_product_id = p.id WHERE l.id = ? OR p.id = ?");
                 $stmt_check->execute([$product_id, $product_id]);
@@ -2603,7 +2495,7 @@ try {
             $merchant_id = $listing['merchant_id'];
             $global_product_id = $listing['global_product_id'];
 
-            // تحديد الكمية المتاحة (للمنتج العادي أو للخيارات والمقاسات)
+
             $available_qty = (int)$listing['quantity'];
             $qty_type = $listing['quantity_type'];
 
@@ -2625,25 +2517,25 @@ try {
                 if (!$found_opt) throw new Exception("المقاس أو الخيار المحدد غير موجود.");
             }
 
-            // تحديث هيكل السلة إذا لم يكن محدثاً
-            try { 
-                $pdo->exec("ALTER TABLE `user_cart` ADD COLUMN `listing_id` VARCHAR(100) NULL AFTER `product_id`, ADD COLUMN `merchant_id` INT(11) NULL AFTER `user_id`"); 
+
+            try {
+                $pdo->exec("ALTER TABLE `user_cart` ADD COLUMN `listing_id` VARCHAR(100) NULL AFTER `product_id`, ADD COLUMN `merchant_id` INT(11) NULL AFTER `user_id`");
                 $pdo->exec("ALTER TABLE `user_cart` ADD UNIQUE KEY IF NOT EXISTS `customer_item_unique` (`customer_id`, `product_id`, `size_id`)");
             } catch (PDOException $e) {}
 
             $stmt_cart_qty = $pdo->prepare("SELECT quantity FROM user_cart WHERE customer_id = ? AND product_id = ? AND (size_id <=> ?)");
             $stmt_cart_qty->execute([$customer_id, $product_id, $size_id]);
             $current_cart_qty = (int)$stmt_cart_qty->fetchColumn();
-            
-            // الفحص الصارم للمخزون
+
+
             if ($qty_type === 'tracked' && ($current_cart_qty + $quantity) > $available_qty) {
                 throw new Exception("عذراً، الكمية المطلوبة غير متوفرة في المخزون (المتاح فعلياً: $available_qty).");
             }
 
-            $sql = "INSERT INTO user_cart (customer_id, product_id, listing_id, user_id, merchant_id, size_id, quantity) 
-                    VALUES (?, ?, ?, ?, ?, ?, ?) 
+            $sql = "INSERT INTO user_cart (customer_id, product_id, listing_id, user_id, merchant_id, size_id, quantity)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                     ON DUPLICATE KEY UPDATE quantity = quantity + VALUES(quantity)";
-            
+
             $stmt_insert = $pdo->prepare($sql);
             $stmt_insert->execute([$customer_id, $global_product_id, $listing_id, $merchant_id, $merchant_id, $size_id, $quantity]);
 
@@ -2655,7 +2547,7 @@ try {
             $pdo->prepare("DELETE FROM user_cart WHERE id = ? AND customer_id = ?")->execute([sanitize_input($input['cartId']), $customer_id]);
             send_response('success');
             break;
-            
+
         case 'update_cart_qty_db':
             if (!$customer_id) send_response('error',[], 401);
             $pdo->prepare("UPDATE user_cart SET quantity = ? WHERE id = ? AND customer_id = ?")->execute([(int)$input['quantity'], sanitize_input($input['cartId']), $customer_id]);
@@ -2676,22 +2568,22 @@ try {
             break;
 
         case 'create_order':
-            // 🔒 معطّل عمداً: إنشاء الطلبات صار حصرياً عبر الـ Worker (D1).
-            // هذا المسار القديم غير متزامن مع نظام المخزون/الطلبات الحالي، وتفعيله
-            // مجدداً قد يُنشئ طلبات "يتيمة" لا يراها التاجر ولا الزبون بشكل صحيح.
+
+
+
             send_response('error', ['message' => 'هذا الإجراء لم يعد متاحاً من هنا.'], 410);
             if (!$customer_id) {
                 send_response('error', ['message' => 'يجب تسجيل الدخول أولاً لإتمام الطلب.'], 401);
             }
-            
-            // 1. نظام منع التكرار (Idempotency)
+
+
             $idempotency_key = sanitize_input($input['idempotency_key'] ?? '');
             if (!empty($idempotency_key)) {
                 try {
                     $stmt_check_key = $pdo->prepare("SELECT response_data FROM idempotency_keys WHERE key_token = ?");
                     $stmt_check_key->execute([$idempotency_key]);
                     $existing_response = $stmt_check_key->fetchColumn();
-                    
+
                     if ($existing_response !== false) {
                         if ($existing_response === 'processing') {
                             send_response('success', ['message' => 'طلبك قيد المعالجة حالياً، يرجى الانتظار...']);
@@ -2705,13 +2597,13 @@ try {
                 }
             }
 
-            // 2. معالجة بيانات الزبون والموقع الجغرافي
+
             $allowed_customer_keys = ['name', 'address', 'gps'];
             $c_data = filter_allowed_keys($input['customer'] ?? [], $allowed_customer_keys);
-            
+
             $raw_address = $c_data['address'] ?? '';
             $details_part = '';
-            
+
             if (strpos($raw_address, '| التفاصيل:') !== false) {
                 $parts = explode('| التفاصيل:', $raw_address);
                 $details_part = isset($parts[1]) ? trim($parts[1]) : '';
@@ -2719,7 +2611,7 @@ try {
                 $safe_gps_temp = sanitize_input($c_data['gps'] ?? '');
                 $details_part = trim(str_replace('رابط الموقع: ' . $safe_gps_temp, '', $raw_address));
             }
-            
+
             $details_part = strip_tags($details_part);
             if (mb_strlen($details_part, 'UTF-8') > 255) $details_part = mb_substr($details_part, 0, 252, 'UTF-8') . '...';
             $details_part = sanitize_input($details_part);
@@ -2730,30 +2622,30 @@ try {
 
             $final_name = !empty($c_data['name']) ? sanitize_input($c_data['name']) : $cust_db['full_name'];
             $customer_gps_link = sanitize_input($c_data['gps'] ?? '');
-            
+
             $final_address = "رابط الموقع: " . $customer_gps_link;
             if (!empty($details_part)) {
                 $final_address .= " | التفاصيل: " . $details_part;
             } elseif (empty($customer_gps_link) && !empty($cust_db['address'])) {
-                $final_address = $cust_db['address']; 
+                $final_address = $cust_db['address'];
             }
 
             if (empty($final_name) || strpos($final_name, 'عميل') === 0) throw new Exception("يجب إدخال اسمك الحقيقي في حسابك أولاً لإتمام الطلب.");
             if (empty($final_address) || strpos($final_address, 'http') === false) throw new Exception("الرجاء تحديد عنوان التوصيل الدقيق على الخريطة وكتابة وصف للموقع 📍");
-            
+
             $customer_coords = extract_coords_from_url($customer_gps_link);
             if (!$customer_coords) throw new Exception("الرجاء تحديد موقع دقيق على الخريطة لتتمكن من إتمام الطلب.");
 
             $dist_from_center = calculate_distance(ALLOWED_DELIVERY_CENTER_LAT, ALLOWED_DELIVERY_CENTER_LNG, $customer_coords['lat'], $customer_coords['lng']);
             if ($dist_from_center > MAX_ALLOWED_DELIVERY_RADIUS_KM) throw new Exception("عذراً، موقعك يقع خارج نطاق التغطية المسموح لخدمة التوصيل.");
 
-            // 3. التحقق المبدئي من السلة
+
             $cart_items = $input['local_cart'] ?? [];
             if (!is_array($cart_items) || empty($cart_items)) throw new Exception('سلة المشتريات فارغة أو تم إرسال الطلب بالفعل!');
 
-            $MIN_CART_VALUE = 1000; 
-            $MAX_QTY_PER_ITEM = 50; 
-            $MAX_TOTAL_QTY = 200;   
+            $MIN_CART_VALUE = 1000;
+            $MAX_QTY_PER_ITEM = 50;
+            $MAX_TOTAL_QTY = 200;
 
             $total_requested_qty = 0;
             $grouped_by_merchant = [];
@@ -2764,19 +2656,19 @@ try {
                 if ($qty > $MAX_QTY_PER_ITEM) throw new Exception("عذراً، لا يمكنك طلب أكثر من {$MAX_QTY_PER_ITEM} وحدة من نفس المنتج.");
 
                 $total_requested_qty += $qty;
-                
+
                 $m_id = $c_item['merchant_id'] ?? $c_item['user_id'] ?? $c_item['merchant_username'] ?? null;
                 if ($m_id === 'null' || $m_id === 'undefined' || $m_id === '') $m_id = null;
 
-                // إذا السلة لم ترسل رقم التاجر، نسحبه فوراً من TiDB
+
                 if (!$m_id) {
                     $product_id = $c_item['product_id'] ?? $c_item['listing_id'] ?? $c_item['id'] ?? null;
                     if ($product_id) {
                         $stmt_find_m = $pdo->prepare("SELECT merchant_id FROM products WHERE id = ?");
                         $stmt_find_m->execute([$product_id]);
                         $m_id = $stmt_find_m->fetchColumn();
-                        
-                        // الدعم العكسي من MySQL
+
+
                         if (!$m_id) {
                             $stmt_find_m = $pdo->prepare("SELECT merchant_id FROM merchant_listings WHERE global_product_id = ? OR id = ?");
                             $stmt_find_m->execute([$product_id, $product_id]);
@@ -2795,8 +2687,8 @@ try {
 
             if ($total_requested_qty > $MAX_TOTAL_QTY) throw new Exception("تجاوزت الحد الأقصى لإجمالي المنتجات المسموح بها في الطلب الواحد.");
 
-            // 4. حساب رسوم التوصيل
-            $total_delivery_fee = 1500; 
+
+            $total_delivery_fee = 1500;
             $merchant_locations = [];
             $merchant_details = [];
 
@@ -2806,11 +2698,11 @@ try {
                 $stmt_merchant = $pdo->prepare("SELECT id, username, store_name, settings FROM users WHERE id = ? OR username = ?");
                 $stmt_merchant->execute([$raw_m_id, $raw_m_id]);
                 $m_info = $stmt_merchant->fetch(PDO::FETCH_ASSOC);
-                
+
                 if (!$m_info) {
                     throw new Exception("المتجر غير موجود أو غير متاح حالياً (المعرف: $raw_m_id). يرجى إزالة منتجاته من السلة.");
                 }
-                
+
                 $actual_m_id = $m_info['id'];
 
                 if ((string)$raw_m_id !== (string)$actual_m_id) {
@@ -2832,7 +2724,7 @@ try {
                 }
                 $last_merchant = end($locations);
                 $route_distance += calculate_distance($last_merchant['lat'], $last_merchant['lng'], $customer_coords['lat'], $customer_coords['lng']);
-                
+
                 $calculated_base_fee = calculate_delivery_fee($route_distance);
                 $total_delivery_fee = $calculated_base_fee + ((count($grouped_by_merchant) - 1) * 300);
             } else {
@@ -2844,22 +2736,22 @@ try {
             $prepared_sub_orders = [];
             $overall_cart_total = 0;
 
-            // ========================================================
-            // 5. التحقق الصارم من الأسعار والمخزون عبر TiDB Cloud (PDO)
-            // ========================================================
+
+
+
             foreach ($grouped_by_merchant as $merchant_id => $items) {
                 $m_info = $merchant_details[$merchant_id];
                 $m_settings = json_decode($m_info['settings'] ?: '{}', true);
-                
+
                 $product_ids = array_map(function($i) { return $i['product_id'] ?? $i['listing_id'] ?? $i['id']; }, $items);
-                $product_ids = array_filter(array_values($product_ids)); // إزالة القيم الفارغة
-                if (empty($product_ids)) continue; // تجاهل التاجر إذا لم توجد منتجات صالحة
+                $product_ids = array_filter(array_values($product_ids));
+                if (empty($product_ids)) continue;
                 $placeholders = implode(',', array_fill(0, count($product_ids), '?'));
                 $params = array_merge([$merchant_id], $product_ids);
 
                 $d1_products = [];
 
-                // 1. جلب المنتجات مباشرة من جدول المنتجات الأساسي في TiDB
+
                 $stmt_p = $pdo->prepare("SELECT * FROM products WHERE merchant_id = ? AND id IN ($placeholders)");
                 $stmt_p->execute($params);
                 $d1_results = $stmt_p->fetchAll(PDO::FETCH_ASSOC);
@@ -2868,12 +2760,12 @@ try {
                     $d1_products[$row['id']] = $row;
                 }
 
-                // 2. الدعم العكسي للمنتجات التي ما زالت في نظام listings القديم
+
                $pdo_sql = "
-    SELECT p.id as global_product_id, p.name, p.image, p.options, p.discount, p.cost_price, 
-           l.id as listing_id, l.merchant_price as price, l.quantity, l.quantity_type, l.currency, l.is_available 
-    FROM merchant_listings l 
-    JOIN products p ON l.global_product_id = p.id 
+    SELECT p.id as global_product_id, p.name, p.image, p.options, p.discount, p.cost_price,
+           l.id as listing_id, l.merchant_price as price, l.quantity, l.quantity_type, l.currency, l.is_available
+    FROM merchant_listings l
+    JOIN products p ON l.global_product_id = p.id
     WHERE l.merchant_id = ? AND (l.id IN ($placeholders) OR p.id IN ($placeholders))
 ";
                 $stmt_pdo = $pdo->prepare($pdo_sql);
@@ -2884,14 +2776,14 @@ try {
                 foreach($pdo_results as $row) {
                     $pid = $row['global_product_id'];
                     $lid = $row['listing_id'];
-                    
-                    $row['id'] = $pid; 
+
+                    $row['id'] = $pid;
                     $row['options'] = json_decode($row['options'] ?? '[]', true) ?: [];
-                    
+
                     if (!isset($d1_products[$pid])) $d1_products[$pid] = $row;
                     if (!isset($d1_products[$lid])) $d1_products[$lid] = $row;
                 }
-                
+
                 $order_items_array = [];
                 $total_products_price = 0;
                 $currency = 'YER';
@@ -2899,12 +2791,12 @@ try {
 
                 foreach ($items as $item) {
                     $product_id = $item['product_id'] ?? $item['listing_id'] ?? $item['id'];
-                    
+
                     if (!isset($d1_products[$product_id])) {
                         $err_msg = "المنتج '{$item['name']}' نفد أو تم حذفه من متجر {$m_info['store_name']}.";
                         throw new Exception($err_msg);
                     }
-                    
+
                     $product = $d1_products[$product_id];
                     if ($product['is_available'] == 0) {
                         throw new Exception("المنتج '{$product['name']}' غير متاح حالياً للطلب.");
@@ -2919,9 +2811,9 @@ try {
                     $item_option_id = $item['size_id'] ?? null;
                     $option_info = null;
                     $item_image = $product['image'];
-                    $base_price = (float)$product['price']; 
+                    $base_price = (float)$product['price'];
 
-                    // معالجة الخيارات (Sizes/Colors)
+
                     if ($item_option_id && !empty($product['options'])) {
                         $found_opt = false;
                         foreach ($product['options'] as $opt) {
@@ -2950,7 +2842,7 @@ try {
 
                     $final_secure_price = $base_price * (1 - ((float)($product['discount'] ?? 0) / 100));
                     $total_products_price += ($final_secure_price * $qty);
-                    
+
                     $order_items_array[] = [
                         'product_id' => $product['id'],
                         'listing_id' => $product['id'],
@@ -2969,12 +2861,12 @@ try {
 
                 $overall_cart_total += $total_products_price;
 
-                // حساب التوصيل المجاني إن وجد
+
                 $actual_delivery_fee = $fee_per_order;
                 if (isset($m_settings['free_shipping_enabled']) && ($m_settings['free_shipping_enabled'] === true || $m_settings['free_shipping_enabled'] === 'true')) {
                     $f_type = $m_settings['free_shipping_type'] ?? 'always';
                     $f_thresh = (float)($m_settings['free_shipping_threshold'] ?? 0);
-                    
+
                     if ($f_type === 'always') $actual_delivery_fee = 0;
                     elseif ($f_type === 'order_value' && $total_products_price >= $f_thresh) $actual_delivery_fee = 0;
                     elseif ($f_type === 'item_count' && $merchant_item_count >= $f_thresh) $actual_delivery_fee = 0;
@@ -3003,9 +2895,9 @@ try {
             $is_order_merged = false;
             $created_tickets = [];
 
-            // ========================================================
-            // 6. إنشاء الطلب في (TiDB)
-            // ========================================================
+
+
+
             try {
                 $pdo->beginTransaction();
 
@@ -3015,14 +2907,14 @@ try {
                 foreach ($prepared_sub_orders as $merchant_id => $sub_order) {
                     $m_info = $sub_order['merchant_info'];
                     $m_username = $m_info['username'];
-                    
-                    // البحث عن طلب معلق سابق لنفس التاجر لدمجه
+
+
                     $stmt_check_pending = $pdo->prepare(
-                        "SELECT ticket_id, ticket_data, status 
-                         FROM live_tickets 
-                         WHERE customer_id = ? AND merchant_id = ? 
-                         AND status IN ('pending_merchant_approval', 'pending_delivery_acceptance') 
-                         AND delivery_agent_id IS NULL 
+                        "SELECT ticket_id, ticket_data, status
+                         FROM live_tickets
+                         WHERE customer_id = ? AND merchant_id = ?
+                         AND status IN ('pending_merchant_approval', 'pending_delivery_acceptance')
+                         AND delivery_agent_id IS NULL
                          FOR UPDATE"
                     );
                     $stmt_check_pending->execute([$customer_id, $merchant_id]);
@@ -3059,10 +2951,10 @@ try {
 
                         $ticket_id = $existing_ticket['ticket_id'];
                         $json_data = json_encode($existing_data, JSON_UNESCAPED_UNICODE);
-                        
+
                         $pdo->prepare("UPDATE live_tickets SET ticket_data = ? WHERE ticket_id = ?")->execute([$json_data, $ticket_id]);
                         $is_order_merged = true;
-                        
+
                         $created_tickets[] = [
                             'ticket_id' => $ticket_id,
                             'merchant_id' => $merchant_id,
@@ -3118,40 +3010,40 @@ try {
                 }
 
                 $pdo->prepare("DELETE FROM user_cart WHERE customer_id = ?")->execute([$customer_id]);
-                
+
                 $pdo->commit();
             } catch (Exception $e) {
                 if ($pdo->inTransaction()) $pdo->rollBack();
                 throw $e;
             }
-    
-            // ========================================================
-            // 7. خصم المخزون من TiDB وإرسال الطلبات لـ Firebase (Post-Processing)
-            // ========================================================
+
+
+
+
             foreach ($created_tickets as $tick) {
                 $m_username = $tick['merchant_username'];
                 $m_id = $tick['merchant_id'];
-                
+
                 try {
                     $fb_products_update = [];
                     try {
-                        // جلب كاش المنتجات الحالي من GitHub (عبر raw.githubusercontent.com)
-                        $fb_products_update = kv_request("stores/$m_username/products") ?: []; 
+
+                        $fb_products_update = kv_request("stores/$m_username/products") ?: [];
                     } catch (Exception $kv_err) {
                         error_log("Ignored GitHub fetch error: " . $kv_err->getMessage());
                     }
-                    
-                    $needs_github_sync = false; 
+
+                    $needs_github_sync = false;
 
                     foreach ($tick['original_items_to_deduct'] as $item) {
                         $pid = $item['product_id'];
-                        
+
                         if ($item['qty_type'] === 'tracked') {
                             if ($item['size_id']) {
-                                // معالجة الخيارات المتعددة JSON
+
                                 $options_array = $item['options_raw'];
                                 $total_remaining_qty = 0;
-                                
+
                                 foreach ($options_array as &$opt) {
                                     if (isset($opt['id']) && $opt['id'] === $item['size_id']) {
                                         $opt['quantity'] = max(0, $opt['quantity'] - $item['quantity']);
@@ -3159,14 +3051,14 @@ try {
                                     $total_remaining_qty += (int)($opt['quantity'] ?? 0);
                                 }
                                 unset($opt);
-                                
+
                                 $opts_json = json_encode($options_array, JSON_UNESCAPED_UNICODE);
-                                
-                                // تحديث TiDB للخيارات
+
+
                                 $stmt_deduct = $pdo->prepare("UPDATE products SET quantity = ?, options = ?, updated_at = ? WHERE id = ? AND merchant_id = ?");
                                 $stmt_deduct->execute([$total_remaining_qty, $opts_json, time(), $pid, $m_id]);
-                                    
-                                // تجهيز بيانات المزامنة    
+
+
                                 if(isset($fb_products_update[$pid])) {
                                     $fb_products_update[$pid]['quantity'] = $total_remaining_qty;
                                     $fb_products_update[$pid]['options'] = $options_array;
@@ -3177,10 +3069,10 @@ try {
                                     }
                                 }
                             } else {
-                                // تحديث TiDB للمنتج العادي
+
                                 $stmt_deduct = $pdo->prepare("UPDATE products SET quantity = quantity - ?, updated_at = ? WHERE id = ? AND merchant_id = ?");
                                 $stmt_deduct->execute([$item['quantity'], time(), $pid, $m_id]);
-                                    
+
                                 if(isset($fb_products_update[$pid])) {
                                     $new_qty = max(0, $item['current_db_qty'] - $item['quantity']);
                                     $fb_products_update[$pid]['quantity'] = $new_qty;
@@ -3194,7 +3086,7 @@ try {
                         }
                     }
 
-                    // مزامنة الكاش لـ GitHub في حال نفاد المخزون
+
                     if ($needs_github_sync) {
                         try {
                             kv_request("stores/$m_username/products", 'PUT', $fb_products_update);
@@ -3209,20 +3101,20 @@ try {
                     error_log("Inventory update failed: " . $inventory_err->getMessage());
                 }
 
-                // [ب] دفع الطلب إلى Firebase
-                // [ب] إرسال إشارة (Signal) لفايربيس لتنبيه التاجر بتحديث الطلبات
+
+
                 try {
                     sync_to_firebase($m_username, "signals/orders_updated", null, time(), 'PUT');
                 } catch (Exception $fb_err) {
                     error_log("Firebase signal sync failed: " . $fb_err->getMessage());
                 }
-                
-                // [ج] إرسال الإشعارات الفورية
+
+
                 try {
                     $stmt_m_info = $pdo->prepare("SELECT phone, store_name, settings FROM users WHERE id = ?");
                     $stmt_m_info->execute([$m_id]);
                     $m_info_db = $stmt_m_info->fetch(PDO::FETCH_ASSOC);
-                    
+
                     if ($m_info_db) {
                         $m_settings = json_decode($m_info_db['settings'] ?? '{}', true);
                         if (isset($m_settings['push_notifications']) && ($m_settings['push_notifications'] === true || $m_settings['push_notifications'] === 'true')) {
@@ -3230,7 +3122,7 @@ try {
                             if (strpos($m_phone, '967') === 0 && strlen($m_phone) >= 12) $m_phone = substr($m_phone, 3);
                             elseif (strpos($m_phone, '00967') === 0) $m_phone = substr($m_phone, 5);
                             elseif (strpos($m_phone, '0') === 0 && strlen($m_phone) == 10) $m_phone = substr($m_phone, 1);
-                            
+
                             $msg_alert = "🛍️ طلب جديد!\nمرحباً متجر {$m_info_db['store_name']}،\nلديك طلب جديد بانتظار الموافقة والتجهيز.\nرقم الطلب: " . substr($tick['ticket_id'], 0, 8);
                             send_via_macrodroid($m_phone, $msg_alert);
                         }
@@ -3240,7 +3132,7 @@ try {
                 }
             }
 
-            // 9. الاستجابة النهائية للزبون
+
             $success_msg = $is_order_merged ? 'تم دمج المنتجات الجديدة لطلبك السابق بنجاح! 🛍️' : 'تم استلام طلبك وبانتظار موافقة التاجر لتجهيزه!';
             $response_data = ['message' => $success_msg];
 
@@ -3258,30 +3150,30 @@ try {
                     send_silent_push_to_merchant($merchant_fcm_token, $tick['ticket_id']);
                 }
             }
-            
+
             send_response('success', $response_data);
             break;
 
         case 'get_orders':
-            // 🔒 معطّل عمداً: قراءة الطلبات (نشطة/مؤرشفة) صارت حصرياً عبر الـ Worker (D1).
+
             send_response('error', ['message' => 'هذا الإجراء لم يعد متاحاً من هنا.'], 410);
             if (!$user_id) send_response('error',['message' => 'غير مصرح لك بالوصول'], 401);
-            $filter = sanitize_input($input['filter'] ?? 'active'); 
-            
-            $orders = []; 
+            $filter = sanitize_input($input['filter'] ?? 'active');
+
+            $orders = [];
             $m_id = intval($user_id);
 
             try {
-                if ($filter === 'active') { 
-                    $sql = "SELECT ticket_id as id, order_group_id, status, created_at, delivery_code, delivery_agent_id, ticket_data 
+                if ($filter === 'active') {
+                    $sql = "SELECT ticket_id as id, order_group_id, status, created_at, delivery_code, delivery_agent_id, ticket_data
                             FROM live_tickets WHERE merchant_id = ? ORDER BY created_at DESC";
-                    $stmt = $pdo->prepare($sql); 
-                    $stmt->execute([$m_id]); 
+                    $stmt = $pdo->prepare($sql);
+                    $stmt->execute([$m_id]);
                     $tickets = $stmt->fetchAll(PDO::FETCH_ASSOC);
-                    
+
                     foreach ($tickets as $t) {
                         $data = json_decode($t['ticket_data'], true);
-                        if (!is_array($data)) continue; 
+                        if (!is_array($data)) continue;
 
                         $fin = $data['financials'] ?? [];
                         $cust = $data['customer'] ?? [];
@@ -3305,17 +3197,17 @@ try {
                             'is_agent_assigned' => ($t['delivery_agent_id'] !== null)
                         ];
                     }
-                } else { 
-                    $sql = "SELECT ticket_id as id, final_status as status, archived_at as created_at, archived_data, total_amount 
+                } else {
+                    $sql = "SELECT ticket_id as id, final_status as status, archived_at as created_at, archived_data, total_amount
                             FROM orders_archive WHERE merchant_id = ? ORDER BY archived_at DESC";
-                    $stmt = $pdo->prepare($sql); 
-                    $stmt->execute([$m_id]); 
+                    $stmt = $pdo->prepare($sql);
+                    $stmt->execute([$m_id]);
                     $archives = $stmt->fetchAll(PDO::FETCH_ASSOC);
-                    
+
                     foreach ($archives as $arc) {
                         $data = json_decode($arc['archived_data'], true);
                         if (!is_array($data)) continue;
-                        
+
                         $fin = $data['financials'] ?? [];
                         $cust = $data['customer'] ?? [];
 
@@ -3333,16 +3225,16 @@ try {
             } catch (Exception $e) {
                 send_response('error',['message' => 'حدث خطأ أثناء جلب البيانات: ' . $e->getMessage()]);
             }
-            break;     
+            break;
 
         case 'get_user_orders':
             if (!$customer_id) send_response('error',[], 401);
-            
+
             $grouped_orders = [];
-            $processed_ticket_ids = []; 
+            $processed_ticket_ids = [];
 
             try {
-                $sql_live = "SELECT ticket_id as id, order_group_id, merchant_id, status, created_at, delivery_code, delivery_agent_id, ticket_data 
+                $sql_live = "SELECT ticket_id as id, order_group_id, merchant_id, status, created_at, delivery_code, delivery_agent_id, ticket_data
                              FROM live_tickets WHERE customer_id = ? ORDER BY created_at DESC";
                 $stmt_live = $pdo->prepare($sql_live);
                 $stmt_live->execute([$customer_id]);
@@ -3352,11 +3244,11 @@ try {
                     $processed_ticket_ids[] = $t['id'];
                     $data = json_decode($t['ticket_data'], true);
                     if (!is_array($data)) $data = [];
-                    
+
                     $fin = isset($data['financials']) && is_array($data['financials']) ? $data['financials'] : [];
                     $cust = isset($data['customer']) && is_array($data['customer']) ? $data['customer'] : [];
                     $merch = isset($data['merchant']) && is_array($data['merchant']) ? $data['merchant'] : [];
-                    
+
                     $agent_name = null; $agent_phone = null; $is_private = false;
                     if (!empty($t['delivery_agent_id'])) {
                         $stmt_agent = $pdo->prepare("SELECT store_name, username, phone, employer_id FROM users WHERE id = ?");
@@ -3380,23 +3272,23 @@ try {
                         'created_at' => $t['created_at'] ?? date('Y-m-d H:i:s'),
                         'delivery_code' => $t['delivery_code'] ?? null,
                         'cancel_reason' => null,
-                        'merchant_id' => $t['merchant_id'] ?? $merch['id'] ?? null, 
+                        'merchant_id' => $t['merchant_id'] ?? $merch['id'] ?? null,
                         'merchant_name' => $merch['name'] ?? 'متجر',
                         'customer_phone' => $cust['phone'] ?? '',
                         'delivery_agent_name' => $agent_name,
                         'delivery_agent_phone' => $agent_phone,
                         'is_private_agent' => $is_private,
-                        'items' => isset($data['items']) && is_array($data['items']) ? array_values($data['items']) : [] 
+                        'items' => isset($data['items']) && is_array($data['items']) ? array_values($data['items']) : []
                     ];
 
                     $group_id = $t['order_group_id'] ?? $t['id'];
-                    if (!isset($grouped_orders[$group_id])) { 
-                        $grouped_orders[$group_id] = ['group_id' => $group_id, 'created_at' => $t['created_at'], 'sub_orders' => []]; 
+                    if (!isset($grouped_orders[$group_id])) {
+                        $grouped_orders[$group_id] = ['group_id' => $group_id, 'created_at' => $t['created_at'], 'sub_orders' => []];
                     }
                     $grouped_orders[$group_id]['sub_orders'][] = $order;
                 }
 
-                $sql_archive = "SELECT ticket_id as id, merchant_id, final_status as status, archived_at as created_at, archived_data, total_amount 
+                $sql_archive = "SELECT ticket_id as id, merchant_id, final_status as status, archived_at as created_at, archived_data, total_amount
                                 FROM orders_archive WHERE customer_id = ? ORDER BY archived_at DESC";
                 $stmt_archive = $pdo->prepare($sql_archive);
                 $stmt_archive->execute([$customer_id]);
@@ -3411,8 +3303,8 @@ try {
                     $cust = isset($data['customer']) && is_array($data['customer']) ? $data['customer'] : [];
                     $merch = isset($data['merchant']) && is_array($data['merchant']) ? $data['merchant'] : [];
                     $agent = isset($data['delivery_agent']) && is_array($data['delivery_agent']) ? $data['delivery_agent'] : [];
-                    
-                    $group_id = $data['order_group_id'] ?? $arc['id']; 
+
+                    $group_id = $data['order_group_id'] ?? $arc['id'];
 
                     $order = [
                         'id' => $arc['id'] ?? 'Unknown',
@@ -3425,7 +3317,7 @@ try {
                         'created_at' => $arc['created_at'] ?? date('Y-m-d H:i:s'),
                         'delivery_code' => null,
                         'cancel_reason' => null,
-                        'merchant_id' => $arc['merchant_id'] ?? $merch['id'] ?? null, 
+                        'merchant_id' => $arc['merchant_id'] ?? $merch['id'] ?? null,
                         'merchant_name' => $merch['name'] ?? 'متجر',
                         'customer_phone' => $cust['phone'] ?? '',
                         'delivery_agent_name' => $agent['name'] ?? null,
@@ -3434,8 +3326,8 @@ try {
                         'items' => isset($data['items']) && is_array($data['items']) ? array_values($data['items']) : []
                     ];
 
-                    if (!isset($grouped_orders[$group_id])) { 
-                        $grouped_orders[$group_id] = ['group_id' => $group_id, 'created_at' => $arc['created_at'], 'sub_orders' => []]; 
+                    if (!isset($grouped_orders[$group_id])) {
+                        $grouped_orders[$group_id] = ['group_id' => $group_id, 'created_at' => $arc['created_at'], 'sub_orders' => []];
                     }
                     $grouped_orders[$group_id]['sub_orders'][] = $order;
                 }
@@ -3472,7 +3364,7 @@ try {
                             'created_at' => $lo['created_at'] ?? '',
                             'delivery_code' => $lo['delivery_code'] ?? null,
                             'cancel_reason' => $lo['cancel_reason'] ?? null,
-                            'merchant_id' => $lo['merchant_id'] ?? null, 
+                            'merchant_id' => $lo['merchant_id'] ?? null,
                             'merchant_name' => $lo['merchant_name'] ?? 'متجر',
                             'customer_phone' => $lo['customer_phone'] ?? '',
                             'delivery_agent_name' => $lo['delivery_agent_name'] ?? null,
@@ -3481,8 +3373,8 @@ try {
                             'items' => $legacy_items
                         ];
 
-                        if (!isset($grouped_orders[$legacy_ticket_id])) { 
-                            $grouped_orders[$legacy_ticket_id] = ['group_id' => $legacy_ticket_id, 'created_at' => $lo['created_at'], 'sub_orders' => []]; 
+                        if (!isset($grouped_orders[$legacy_ticket_id])) {
+                            $grouped_orders[$legacy_ticket_id] = ['group_id' => $legacy_ticket_id, 'created_at' => $lo['created_at'], 'sub_orders' => []];
                         }
                         $grouped_orders[$legacy_ticket_id]['sub_orders'][] = $order;
                     }
@@ -3497,7 +3389,7 @@ try {
 
             } catch (Exception $e) {
                 error_log("API Error in get_user_orders: " . $e->getMessage());
-                send_response('success', ['data' => []]); 
+                send_response('success', ['data' => []]);
             }
             break;
 
@@ -3512,14 +3404,14 @@ try {
             if (strpos($phone, '967') === 0 && strlen($phone) >= 12) $phone = substr($phone, 3);
             elseif (strpos($phone, '00967') === 0) $phone = substr($phone, 5);
             elseif (strpos($phone, '0') === 0 && strlen($phone) == 10) $phone = substr($phone, 1);
-            $message = "مرحباً {$cust['full_name']}\nكود التفعيل الخاص بك هو: {$otp}\nلا تشاركه مع أحد.";
+            $message = build_otp_message($otp, 'كود تفعيل الحساب', 5, $cust['full_name']);
             $sms_sent = send_via_macrodroid($phone, $message);
             $smsMsg = $sms_sent ? "، جاري إرسال الـ SMS من هاتفك" : "، (ملاحظة: يبدو أن سيرفر الإرسال/الجوال متوقف، لن يتم إرسال SMS)";
             send_response('success',['message' => 'تم توليد الكود' . $smsMsg, 'otp' => $otp, 'phone' => $phone, 'name' => $cust['full_name']]);
             break;
 
         case 'check_phone':
-            $identifier = sanitize_input($input['phone'] ?? ''); 
+            $identifier = sanitize_input($input['phone'] ?? '');
             $is_phone = (bool)preg_match('/^[0-9]+$/', $identifier);
 
             if ($is_phone) {
@@ -3530,9 +3422,9 @@ try {
                 $stmt = $pdo->prepare("SELECT id, username, store_name, role FROM users WHERE username = ? AND role IN ('merchant', 'delivery')");
                 $stmt->execute([$identifier]);
             }
-            
+
             $accounts = $stmt->fetchAll(PDO::FETCH_ASSOC);
-        
+
             if (count($accounts) === 0) {
                 send_response('user_not_found');
             } elseif (count($accounts) === 1) {
@@ -3542,12 +3434,12 @@ try {
                 if (mb_strlen($original_name) > 4) {
                     $masked_name = mb_substr($original_name, 0, 2) . '...' . mb_substr($original_name, -2);
                 }
-                
+
                 $can_add_role = null;
                 if ($is_phone) {
                      $can_add_role = ($account['role'] === 'merchant') ? 'delivery' : 'merchant';
                 }
-               
+
                 send_response('user_found',['name' => $masked_name, 'can_add_role' => $can_add_role]);
             } else {
                 $accounts_by_role =[];
@@ -3557,7 +3449,7 @@ try {
                 send_response('multiple_users_found',['accounts' => $accounts_by_role]);
             }
             break;
-                                    
+
         case 'select_role':
             $user_id_to_login = $input['user_id'] ?? null;
             $allowed_accounts = $_SESSION['login_selection_data'] ??[];
@@ -3574,9 +3466,9 @@ try {
             $stmt = $pdo->prepare("SELECT id, username, store_name, role, is_active FROM users WHERE id = ?");
             $stmt->execute([$user_id_to_login]);
             $user = $stmt->fetch(PDO::FETCH_ASSOC);
-        
+
             if (!$user || !$user['is_active']) throw new Exception("الحساب غير موجود أو غير نشط.");
-        
+
             $_SESSION['user_id'] = $user['id'];
             $_SESSION['username'] = $user['username'];
             $_SESSION['store_name'] = $user['store_name'];
@@ -3584,16 +3476,16 @@ try {
             $_SESSION['role'] = $user['role'];
             $_SESSION['device_token'] = $_COOKIE['device_token'] ?? '';
             unset($_SESSION['login_selection_data']);
-            
+
             $payload =['user_id' => $user['id'], 'username' => $user['username'], 'store_name' => $user['store_name'], 'role' => $user['role'], 'device_token' => $_COOKIE['device_token'] ?? ''];
-            // APP_SECRET_KEY مُعرَّف بالفعل عند بداية الملف عبر متغيرات البيئة
+
             $token = generate_signed_token($payload, 480);
-            
+
             $redirect = ($user['role'] === 'merchant') ? 'merchant-dashboard.php' : 'delivery-dashboard.php';
-            // ⭐ تصحيح (2026-07-21): نفس تصحيح مزامنة العميل — نزامن التاجر إلى D1
-            // *قبل* إرسال الرد، لأن send_response_and_continue_in_background تعتمد
-            // على fastcgi_finish_request غير المضمونة على منصات مثل Render، وهذا
-            // كان يمنع مزامنة أي تاجر إطلاقاً حتى الآن.
+
+
+
+
             sync_user_to_worker($pdo, $user['id']);
             send_response('success', ['token' => $token, 'redirect' => $redirect]);
 
@@ -3632,7 +3524,7 @@ try {
             if ($is_locked) {
                 throw new Exception("تم قفل هذا الحساب تحديداً لمدة 15 دقيقة بسبب تجاوز 5 محاولات دخول فاشلة. يرجى المحاولة بعد {$lockout_time_remaining} دقيقة.");
             }
-            
+
             foreach ($accounts as $acc) {
                 if (password_verify($password, $acc['password']) && $acc['account_status'] === 'pending') {
                     throw new Exception("حسابك حالياً قيد المراجعة من قبل الإدارة لتخصيص مساحة التخزين الخاصة بك. سيتم تفعيل حسابك قريباً.");
@@ -3641,7 +3533,7 @@ try {
                     throw new Exception("نعتذر، تم رفض طلب انضمامك كتاجر.");
                 }
             }
-            
+
             $valid_logins =[];
             foreach ($accounts as $account) {
                 if (password_verify($password, $account['password'])) {
@@ -3685,7 +3577,7 @@ try {
                 $params = array_merge($user_ids_to_check,[$device_token]);
                 $stmt_dev->execute($params);
                 $trusted_count = (int) $stmt_dev->fetchColumn();
-                
+
                 if ($trusted_count === count($valid_logins)) {
                     $is_fully_trusted = true;
                     $pdo->prepare("UPDATE trusted_devices SET last_used_at = NOW() WHERE user_id IN ($placeholders) AND device_token = ?")
@@ -3696,12 +3588,12 @@ try {
             if (!$is_fully_trusted) {
                 $phone_to_check = $valid_logins[0]['phone'];
                 $otp = generate_secure_otp();
-                
-                // ⭐ التوكن موقَّع (HMAC) فقط وليس مُشفَّراً، لذلك لم يعد يحمل الكود الصريح
-                // بل hash_hmac منه فقط، بحيث لا يقدر أي شخص يملك الكوكي أن يقرأ الكود بفك base64.
+
+
+
                 $token_payload =[ 'purpose' => 'new_device_login', 'phone' => $phone_to_check, 'valid_logins' => $valid_logins, 'otp_hash' => hash_otp($otp), 'attempts' => 0 ];
                 $state_token = generate_signed_token($token_payload, 5);
-                
+
                 setcookie('state_token', $state_token, [
                     'expires' => time() + 300,
                     'path' => '/',
@@ -3710,32 +3602,32 @@ try {
                     'httponly' => true,
                     'samesite' => 'None'
                 ]);
-                
-                $message = "رمز التحقق لتسجيل الدخول من جهاز جديد هو: {$otp}";
-                try { 
+
+                $message = build_otp_message($otp, 'كود تسجيل الدخول من جهاز جديد', 5);
+                try {
                     $pdo->prepare("DELETE FROM sms_queue WHERE phone_number = ?")->execute([$phone_to_check]);
-                    $pdo->prepare("INSERT INTO sms_queue (phone_number, message) VALUES (?, ?)")->execute([$phone_to_check, $message]); 
+                    $pdo->prepare("INSERT INTO sms_queue (phone_number, message) VALUES (?, ?)")->execute([$phone_to_check, $message]);
                 } catch(PDOException $e) {}
                 send_via_macrodroid($phone_to_check, $message);
-                
+
                 send_response('new_device_otp_required',['message' => 'تم اكتشاف محاولة دخول من جهاز جديد. يرجى إدخال رمز التحقق المرسل لجوالك.', 'state_token' => $state_token]);
             }
 
             if (count($valid_logins) === 1) {
                 $user = $valid_logins[0];
 
-                // APP_SECRET_KEY مُعرَّف بالفعل عند بداية الملف عبر متغيرات البيئة
+
 
                 $payload = [
-                    'user_id' => $user['id'], 
+                    'user_id' => $user['id'],
                     'username' => $user['username'],
-                    'store_name' => $user['store_name'], 
+                    'store_name' => $user['store_name'],
                     'role' => $user['role'],
-                    'device_token' => $device_token // إضافة بصمة الجهاز
+                    'device_token' => $device_token
                 ];
-                // تم إزالة المسار السري لفايربيس لسد ثغرة الوصول المباشر
-                
-                $token = generate_signed_token($payload, 5256000); // 30 يوماً
+
+
+                $token = generate_signed_token($payload, 5256000);
                 $needs_settings = false;
                 if ($user['role'] === 'merchant') {
                     $stmt_check = $pdo->prepare("SELECT store_type, settings FROM users WHERE id = ?");
@@ -3746,14 +3638,14 @@ try {
                         $needs_settings = true;
                     }
                 }
-                
+
                 $redirect = ($user['role'] === 'merchant') ? 'merchant-dashboard.php' : 'delivery-dashboard.php';
                 if ($needs_settings) $redirect .= '?force_settings=1';
 
-                // ⭐ تصحيح (2026-07-21): كانت المزامنة تصير بعد send_response_and_continue_in_background
-                // اللي تعتمد على fastcgi_finish_request غير المضمونة على Render، فما كانت
-                // تنفّذ فعلياً أبداً. الآن نزامن *قبل* إرسال الرد لضمان وصول بيانات
-                // التاجر لـ D1 قبل أي طلب لاحق (مثل create_order من العميل).
+
+
+
+
                 sync_user_to_worker($pdo, $user['id']);
                 send_response('success', ['token' => $token, 'redirect' => $redirect]);
 
@@ -3766,18 +3658,18 @@ try {
                 send_response('role_selection_required',['accounts' => $selection_data]);
             }
             break;
-            
+
         case 'verify_new_device_otp':
             $otp_input = $input['otp'] ?? '';
             $token = $input['state_token'] ?? $_COOKIE['state_token'] ?? '';
             $is_secure = (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on') || (isset($_SERVER['HTTP_X_FORWARDED_PROTO']) && $_SERVER['HTTP_X_FORWARDED_PROTO'] === 'https');
-            
+
             try {
                 $payload = verify_signed_token($token, 'new_device_login');
             } catch (Exception $e) {
                 throw new Exception($e->getMessage());
             }
-            
+
             if (!verify_otp_hash($otp_input, $payload['otp_hash'] ?? null)) {
                 $payload['attempts']++;
                 if ($payload['attempts'] >= 3) {
@@ -3788,7 +3680,7 @@ try {
                 setcookie('state_token', $new_token, ['expires' => time() + 300, 'path' => '/', 'secure' => $is_secure, 'httponly' => true, 'samesite' => $is_secure ? 'None' : 'Lax']);
                 throw new Exception('رمز التحقق غير صحيح. تبقى لك ' . (3 - $payload['attempts']) . ' محاولات.');
             }
-            
+
             $valid_logins = $payload['valid_logins'];
             $new_device_token = bin2hex(random_bytes(32));
             $user_agent = $_SERVER['HTTP_USER_AGENT'] ?? 'Unknown';
@@ -3797,17 +3689,17 @@ try {
             foreach ($valid_logins as $account_to_trust) {
                 $stmt_insert->execute([$account_to_trust['id'], $new_device_token, $user_agent]);
             }
-            
+
             setcookie('device_token', $new_device_token,[
-                'expires' => time() + (86400 * 365), 
+                'expires' => time() + (86400 * 365),
                 'path' => '/',
                 'secure' => $is_secure,
                 'httponly' => true,
                 'samesite' => $is_secure ? 'None' : 'Lax'
             ]);
-            
-            setcookie('state_token', '', ['expires' => time() - 3600, 'path' => '/', 'secure' => $is_secure, 'httponly' => true, 'samesite' => $is_secure ? 'None' : 'Lax']); 
-            
+
+            setcookie('state_token', '', ['expires' => time() - 3600, 'path' => '/', 'secure' => $is_secure, 'httponly' => true, 'samesite' => $is_secure ? 'None' : 'Lax']);
+
             if (count($valid_logins) === 1) {
                 $user = $valid_logins[0];
                 $_SESSION['user_id'] = $user['id'];
@@ -3816,18 +3708,18 @@ try {
                 $_SESSION['loggedin'] = true;
                 $_SESSION['role'] = $user['role'];
                 $_SESSION['device_token'] = $new_device_token;
-                
+
                 $payload = ['user_id' => $user['id'], 'username' => $user['username'], 'store_name' => $user['store_name'], 'role' => $user['role'], 'device_token' => $new_device_token];
-                // APP_SECRET_KEY مُعرَّف بالفعل عند بداية الملف عبر متغيرات البيئة
+
                 $token = generate_signed_token($payload, 480);
-                
+
                 $redirect = ($user['role'] === 'merchant') ? 'merchant-dashboard.html' : 'delivery-dashboard.html';
-                // ⭐ تصحيح (2026-07-21): هذا المسار (تسجيل دخول بجهاز جديد عبر كود
-                // تحقق) كان لا يستدعي sync_user_to_worker() إطلاقاً من الأساس —
-                // بعكس مسارات تسجيل الدخول الأخرى. وهو الأشيع عملياً (أي دخول من
-                // جهاز/متصفح جديد أو بعد تسجيل خروج)، فكان سبب استمرار خلو جدول
-                // users في D1 من بيانات التاجر حتى بعد تصحيح مشكلة التايمنج بالمسارات
-                // الأخرى.
+
+
+
+
+
+
                 sync_user_to_worker($pdo, $user['id']);
                 send_response('success',['token' => $token, 'redirect' => $redirect]);
             } else {
@@ -3838,10 +3730,10 @@ try {
                 $_SESSION['login_selection_data'] = $selection_data;
                 send_response('role_selection_required',['accounts' => $selection_data]);
             }
-            break;        
+            break;
 
         case 'register_init':
-            $allowed_fields = ['phone', 'role', 'name', 'username', 'password', 'location', 'store_type']; 
+            $allowed_fields = ['phone', 'role', 'name', 'username', 'password', 'location', 'store_type'];
             $safe_input = filter_allowed_keys($input, $allowed_fields);
 
             $phone = preg_replace('/[^0-9]/', '', $safe_input['phone'] ?? '');
@@ -3850,8 +3742,8 @@ try {
             $username = sanitize_input($safe_input['username'] ?? '');
             $password = $safe_input['password'] ?? null;
             $location = sanitize_input($safe_input['location'] ?? '');
-            $store_type = sanitize_input($safe_input['store_type'] ?? ''); 
-            
+            $store_type = sanitize_input($safe_input['store_type'] ?? '');
+
             if (empty($location) || !is_valid_gps_location($location)) {
                 throw new Exception("رابط الموقع الجغرافي (GPS) غير صالح أو يقع خارج النطاق المسموح للخدمة. يرجى تحديده بدقة.");
             }
@@ -3866,18 +3758,18 @@ try {
 
             $stmt = $pdo->prepare("SELECT id FROM users WHERE username = ?"); $stmt->execute([$username]);
             if ($stmt->fetch()) throw new Exception("اسم المستخدم هذا محجوز بالفعل.");
-            
-            $stmt = $pdo->prepare("SELECT id FROM users WHERE phone = ?"); 
+
+            $stmt = $pdo->prepare("SELECT id FROM users WHERE phone = ?");
             $stmt->execute([$phone]);
             $existing_accounts = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
             if (!empty($existing_accounts)) {
                 throw new Exception("هذا الرقم مسجل مسبقاً في النظام. لإضافة دور جديد (تاجر/مندوب)، يرجى تسجيل الدخول أولاً ثم إضافته من إعدادات حسابك من الداخل.");
             }
-            
+
             $otp = generate_secure_otp();
             $hashed_pass = password_hash($password, PASSWORD_DEFAULT);
-            
+
             $token_payload = [
                 'purpose' => 'registration',
                 'username' => $username,
@@ -3886,12 +3778,12 @@ try {
                 'phone' => $phone,
                 'role' => $role,
                 'location' => $location,
-                'store_type' => $store_type, 
+                'store_type' => $store_type,
                 'otp_hash' => hash_otp($otp),
                 'attempts' => 0
             ];
             $state_token = generate_signed_token($token_payload, 10);
-            
+
             setcookie('state_token', $state_token, [
                 'expires' => time() + 600,
                 'path' => '/',
@@ -3901,19 +3793,19 @@ try {
                 'samesite' => 'None'
             ]);
 
-            $message = "كود تفعيل حساب الشريك الخاص بك هو: {$otp}";
-            
+            $message = build_otp_message($otp, 'كود تفعيل حساب الشريك', 10);
+
             $pdo->prepare("DELETE FROM sms_queue WHERE phone_number = ?")->execute([$phone]);
             $pdo->prepare("INSERT INTO sms_queue (phone_number, message) VALUES (?, ?)")->execute([$phone, $message]);
             send_via_macrodroid($phone, $message);
-            
+
             send_response('success_otp_sent', ['state_token' => $state_token]);
             break;
-        
+
         case 'register_verify':
             $otp = $input['otp'] ?? '';
             $token = $input['state_token'] ?? $_COOKIE['state_token'] ?? '';
-            
+
             try {
                 $payload = verify_signed_token($token, 'registration');
             } catch (Exception $e) {
@@ -3936,14 +3828,14 @@ try {
             $default_settings = json_encode(['location' => $payload['location']], JSON_UNESCAPED_UNICODE);
             $stmt = $pdo->prepare("INSERT INTO users (username, password, store_name, phone, role, is_active, account_status, settings, store_type) VALUES (?, ?, ?, ?, ?, 1, 'approved', ?, ?)");
             $stmt->execute([$payload['username'], $payload['password'], $payload['store_name'], $payload['phone'], $payload['role'], $default_settings, $payload['store_type']]);
-            
+
             $new_merchant_id = $pdo->lastInsertId();
             $merchant_username = $payload['username'];
 
             $new_device_token = bin2hex(random_bytes(32));
             $user_agent = $_SERVER['HTTP_USER_AGENT'] ?? 'Unknown';
             $pdo->prepare("INSERT INTO trusted_devices (user_id, device_token, user_agent) VALUES (?, ?, ?)")->execute([$new_merchant_id, $new_device_token, $user_agent]);
-            
+
             setcookie('device_token', $new_device_token, [
                 'expires' => time() + (86400 * 365),
                 'path' => '/',
@@ -3954,7 +3846,7 @@ try {
 
             $initData = [
                 'details' => ['id' => $new_merchant_id, 'name' => $payload['store_name'], 'username' => $merchant_username, 'phone' => $payload['phone']],
-                'products' => [] 
+                'products' => []
             ];
 
             $fb_url = getenv('FIREBASE_DB_URL') ?: $_ENV['FIREBASE_DB_URL'] ?: 'https://shiban-a2757-default-rtdb.europe-west1.firebasedatabase.app/';
@@ -3970,17 +3862,17 @@ try {
             curl_close($ch);
 
             flag_cache_for_rebuild($new_merchant_id);
-            
-            // توليد ملف المتجر الأولي في GitHub
+
+
             sync_merchant_info_json($pdo, $new_merchant_id, $merchant_username);
 
-            // ⭐ تصحيح: حساب التاجر/المندوب الجديد ما كان يتزامن مع D1 إطلاقاً عند
-            // إنشائه لأول مرة — فيضل غائب عن الـ Worker لحد أول تسجيل دخول لاحق.
+
+
             sync_user_to_worker($pdo, $new_merchant_id);
 
             setcookie('state_token', '', ['expires' => time() - 3600, 'path' => '/', 'secure' => $is_secure, 'httponly' => true, 'samesite' => $is_secure ? 'None' : 'Lax']);
             send_response('success',['message' => 'تم تفعيل حسابك بنجاح! يمكنك الآن تسجيل الدخول.']);
-            break;        
+            break;
 
         case 'create_private_agent':
             if ($user_role !== 'merchant') throw new Exception("غير مصرح لك. هذه الخاصية للتجار فقط.");
@@ -3989,7 +3881,7 @@ try {
             $safe_input = filter_allowed_keys($input, $allowed_fields);
 
             $u = sanitize_input($safe_input['username'] ?? '');
-            $s = sanitize_input($safe_input['store_name'] ?? ''); 
+            $s = sanitize_input($safe_input['store_name'] ?? '');
             $phone = sanitize_input($safe_input['phone'] ?? '');
             $p = $safe_input['password'] ?? '';
 
@@ -4007,7 +3899,7 @@ try {
             $stmt = $pdo->prepare("INSERT INTO users (username, password, store_name, phone, role, is_active, employer_id, settings) VALUES (?, ?, ?, ?, 'delivery', 1, ?, ?)");
             $stmt->execute([$u, $hashed_pass, $s, $phone, $user_id, $settings_json]);
 
-            // ⭐ تصحيح: نفس المشكلة — المندوب الخاص الجديد ما كان يتزامن مع D1
+
             sync_user_to_worker($pdo, $pdo->lastInsertId());
 
             send_response('success',['message' => 'تم إضافة المندوب الخاص بنجاح.']);
@@ -4062,7 +3954,7 @@ try {
 
                     if ($distance <= 10) {
                         $agent['distance_km'] = round($distance, 2);
-                        unset($agent['last_location']); 
+                        unset($agent['last_location']);
                         $nearby_agents[] = $agent;
                     }
                 }
@@ -4087,12 +3979,12 @@ try {
                 elseif (strpos($search_term, '0') === 0 && strlen($search_term) == 10) $search_term = substr($search_term, 1);
             }
 
-            $sql = "SELECT u.id, u.username, u.store_name as display_name, 
-                    (SELECT status FROM merchant_agent_links WHERE merchant_id = ? AND agent_id = u.id LIMIT 1) as link_status 
-                    FROM users u 
-                    WHERE u.role = 'delivery' AND u.is_active = 1 AND u.employer_id IS NULL 
+            $sql = "SELECT u.id, u.username, u.store_name as display_name,
+                    (SELECT status FROM merchant_agent_links WHERE merchant_id = ? AND agent_id = u.id LIMIT 1) as link_status
+                    FROM users u
+                    WHERE u.role = 'delivery' AND u.is_active = 1 AND u.employer_id IS NULL
                     AND (u.phone = ? OR u.username = ?) LIMIT 1";
-            
+
             $stmt = $pdo->prepare($sql);
             $stmt->execute([$user_id, $search_term, $search_term]);
             $agent = $stmt->fetch(PDO::FETCH_ASSOC);
@@ -4133,11 +4025,11 @@ try {
 
         case 'get_agent_invitations':
             if ($user_role !== 'delivery') throw new Exception("غير مصرح لك. للمندوب فقط.");
-            
-            $sql = "SELECT l.id as link_id, u.store_name as merchant_name, u.phone as merchant_phone, l.created_at 
-                    FROM merchant_agent_links l 
-                    JOIN users u ON l.merchant_id = u.id 
-                    WHERE l.agent_id = ? AND l.status = 'pending' 
+
+            $sql = "SELECT l.id as link_id, u.store_name as merchant_name, u.phone as merchant_phone, l.created_at
+                    FROM merchant_agent_links l
+                    JOIN users u ON l.merchant_id = u.id
+                    WHERE l.agent_id = ? AND l.status = 'pending'
                     ORDER BY l.created_at DESC";
             $stmt = $pdo->prepare($sql);
             $stmt->execute([$user_id]);
@@ -4164,32 +4056,32 @@ try {
 
         case 'get_merchant_linked_agents':
             if ($user_role !== 'merchant') throw new Exception("غير مصرح لك. للتاجر فقط.");
-            $sql = "SELECT l.id as link_id, u.id as agent_id, u.username, u.store_name as display_name, u.phone, l.status, l.created_at 
-                    FROM merchant_agent_links l 
-                    JOIN users u ON l.agent_id = u.id 
+            $sql = "SELECT l.id as link_id, u.id as agent_id, u.username, u.store_name as display_name, u.phone, l.status, l.created_at
+                    FROM merchant_agent_links l
+                    JOIN users u ON l.agent_id = u.id
                     WHERE l.merchant_id = ? AND l.status IN ('accepted', 'pending')
                     ORDER BY l.status ASC, l.created_at DESC";
             $stmt = $pdo->prepare($sql);
             $stmt->execute([$user_id]);
             send_response('success',['data' => $stmt->fetchAll(PDO::FETCH_ASSOC)]);
             break;
-     
+
         case 'recover_init':
             $phone = preg_replace('/[^0-9]/', '', $input['phone'] ?? '');
             try { $pdo->exec("ALTER TABLE users ADD COLUMN password_changed_at DATETIME NULL"); } catch (Exception $e) {}
-            
+
             $stmt_user = $pdo->prepare("SELECT id, password_changed_at FROM users WHERE phone = ? AND role IN ('merchant', 'delivery') LIMIT 1");
             $stmt_user->execute([$phone]);
             $user_data = $stmt_user->fetch(PDO::FETCH_ASSOC);
 
             if (!$user_data) throw new Exception("هذا الرقم غير مسجل لدينا كشريك.");
-            
+
             if ($user_data['password_changed_at'] && (time() - strtotime($user_data['password_changed_at'])) < 1800) {
                 throw new Exception("لقد قمت بتغيير كلمتك مؤخراً، يرجى الانتظار لحماية حسابك.");
             }
-        
+
             $otp = generate_secure_otp();
-            
+
             $token_payload =[
                 'purpose' => 'password_recovery_otp',
                 'phone' => $phone,
@@ -4197,7 +4089,7 @@ try {
                 'attempts' => 0
             ];
             $state_token = generate_signed_token($token_payload, 10);
-            
+
             setcookie('state_token', $state_token, [
                 'expires' => time() + 600,
                 'path' => '/',
@@ -4206,21 +4098,21 @@ try {
                 'httponly' => true,
                 'samesite' => 'None'
             ]);
-            
-            $message = "كود استعادة كلمة المرور الخاص بك هو: {$otp}";
-            
+
+            $message = build_otp_message($otp, 'كود استعادة كلمة المرور', 10);
+
             $pdo->prepare("DELETE FROM sms_queue WHERE phone_number = ?")->execute([$phone]);
             $pdo->prepare("INSERT INTO sms_queue (phone_number, message) VALUES (?, ?)")->execute([$phone, $message]);
             send_via_macrodroid($phone, $message);
-            
+
             send_response('success', ['state_token' => $state_token]);
             break;
-        
+
         case 'recover_check_otp':
             $phone = preg_replace('/[^0-9]/', '', $input['phone'] ?? '');
             $otp_input = $input['otp'] ?? '';
             $token = $input['state_token'] ?? $_COOKIE['state_token'] ?? '';
-            
+
             try {
                 $payload = verify_signed_token($token, 'password_recovery_otp');
             } catch (Exception $e) {
@@ -4259,7 +4151,7 @@ try {
                 'phone' => $phone
             ];
             $reset_token = generate_signed_token($token_payload, 10);
-            
+
             setcookie('state_token', $reset_token, [
                 'expires' => time() + 600,
                 'path' => '/',
@@ -4268,10 +4160,10 @@ try {
                 'httponly' => true,
                 'samesite' => 'None'
             ]);
-            
+
             send_response('success', ['state_token' => $reset_token]);
             break;
-        
+
         case 'recover_set_password':
             $token = $input['state_token'] ?? $_COOKIE['state_token'] ?? '';
             $is_secure = (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on') || (isset($_SERVER['HTTP_X_FORWARDED_PROTO']) && $_SERVER['HTTP_X_FORWARDED_PROTO'] === 'https');
@@ -4285,21 +4177,21 @@ try {
             $phone = $payload['phone'];
             $password = $input['password'] ?? '';
             if (strlen($password) < 8) throw new Exception("كلمة المرور يجب أن تكون 8 أحرف على الأقل.");
-            
+
             $hashed_pass = password_hash($password, PASSWORD_DEFAULT);
             $stmt = $pdo->prepare("UPDATE users SET password = ?, password_changed_at = NOW() WHERE phone = ?");
             $stmt->execute([$hashed_pass, $phone]);
-            
+
             $stmt_uid = $pdo->prepare("SELECT id FROM users WHERE phone = ?");
             $stmt_uid->execute([$phone]);
             $recovered_uid = $stmt_uid->fetchColumn();
-            
+
             if ($recovered_uid) {
                 $pdo->prepare("DELETE FROM trusted_devices WHERE user_id = ?")->execute([$recovered_uid]);
                 $new_device_token = bin2hex(random_bytes(32));
                 $user_agent = $_SERVER['HTTP_USER_AGENT'] ?? 'Unknown';
                 $pdo->prepare("INSERT INTO trusted_devices (user_id, device_token, user_agent) VALUES (?, ?, ?)")->execute([$recovered_uid, $new_device_token, $user_agent]);
-                
+
                 setcookie('device_token', $new_device_token, [
                     'expires' => time() + (86400 * 365),
                     'path' => '/',
@@ -4308,59 +4200,59 @@ try {
                     'samesite' => $is_secure ? 'None' : 'Lax'
                 ]);
             }
-            
-            setcookie('state_token', '', ['expires' => time() - 3600, 'path' => '/', 'secure' => $is_secure, 'httponly' => true, 'samesite' => $is_secure ? 'None' : 'Lax']); 
+
+            setcookie('state_token', '', ['expires' => time() - 3600, 'path' => '/', 'secure' => $is_secure, 'httponly' => true, 'samesite' => $is_secure ? 'None' : 'Lax']);
             send_response('success');
-            break;                
+            break;
 
         case 'logout':
             if (!$user_id) send_response('error',['message' => 'غير مصرح'], 401);
 
             unset($_SESSION['user_id'], $_SESSION['username'], $_SESSION['store_name'], $_SESSION['role']);
-            
+
             if (empty($_SESSION['customer_id'])) {
                 $_SESSION = [];
                 session_destroy();
             }
-            
+
             send_response('success',['message' => 'تم تسجيل الخروج بنجاح، وسيتذكر النظام هذا الجهاز في المرة القادمة.']);
             break;
 
         case 'get_trusted_devices':
             if (!$user_id) send_response('error',['message' => 'غير مصرح'], 401);
-            
+
             $stmt_devices = $pdo->prepare("SELECT id, user_agent, created_at, last_used_at, device_token FROM trusted_devices WHERE user_id = ? ORDER BY last_used_at DESC");
             $stmt_devices->execute([$user_id]);
             $devices = $stmt_devices->fetchAll(PDO::FETCH_ASSOC);
-            
+
             $current_device_token = $_COOKIE['device_token'] ?? '';
             foreach($devices as &$device) {
                 $device['is_current_device'] = ($device['device_token'] === $current_device_token);
-                unset($device['device_token']); 
+                unset($device['device_token']);
             }
-        
+
             send_response('success',['data' => $devices]);
             break;
 
         case 'revoke_trusted_device':
             if (!$user_id) send_response('error',['message' => 'غير مصرح'], 401);
-            
+
             $device_id_to_revoke = sanitize_input($input['device_id'] ?? null);
             if(!$device_id_to_revoke) throw new Exception("معرّف الجهاز مطلوب.");
-            
+
             $stmt_check = $pdo->prepare("SELECT device_token FROM trusted_devices WHERE id = ? AND user_id = ?");
             $stmt_check->execute([$device_id_to_revoke, $user_id]);
             $token_to_revoke = $stmt_check->fetchColumn();
-            
+
             if(!$token_to_revoke) {
                 throw new Exception("الجهاز غير موجود أو لا تملك صلاحية حذفه.");
             }
-        
+
             $is_current_device = (isset($_COOKIE['device_token']) && $_COOKIE['device_token'] === $token_to_revoke);
-        
+
             $stmt_delete = $pdo->prepare("DELETE FROM trusted_devices WHERE id = ? AND user_id = ?");
             $stmt_delete->execute([$device_id_to_revoke, $user_id]);
-            
+
             if ($stmt_delete->rowCount() > 0) {
                 if ($is_current_device) {
                     setcookie('device_token', '',[
@@ -4381,63 +4273,63 @@ try {
             }
             break;
 
-        // =======================================================
-        // مهام المنتجات
-        // =======================================================
-        
+
+
+
+
         case 'get_next_product_number':
             if (!$user_id) send_response('error',['message' => 'غير مصرح'], 401);
             $num = ($pdo->query("SELECT MAX(CAST(product_number AS UNSIGNED)) FROM products")->fetchColumn() ?: 0) + 1;
             send_response('success',['number' => $num]);
             break;
 
-        case 'save_product':     
-            // 1. التحقق من الصلاحيات
+        case 'save_product':
+
             if (!$user_id || $user_role !== 'merchant') {
                 send_response('error', ['message' => 'غير مصرح لك بإضافة أو تعديل المنتجات.'], 401);
             }
-            // 2. تنظيف المدخلات
+
             $pid = !empty($_POST['id']) ? sanitize_input($_POST['id']) : 'prod_' . generate_uuid();
             $is_edit = !empty($_POST['id']);
-            
+
             $sell_price = floatval($_POST['price'] ?? 0);
             $cost_price = floatval($_POST['cost_price'] ?? 0);
             $currency = sanitize_input($_POST['currency'] ?? 'YER');
             $discount_percent = floatval($_POST['discount'] ?? 0);
-            
+
             $quantity_type = sanitize_input($_POST['quantity_type'] ?? 'tracked');
             $quantity = ($quantity_type === 'unlimited') ? 9999 : (int)($_POST['quantity'] ?? 0);
-            // ✅ إصلاح: قراءة صحيحة لـ isAvailable سواء جاء '1', 'on', 'true', أو 1
+
             $is_available_raw = $_POST['isAvailable'] ?? '0';
             $is_available = ($is_available_raw === '1' || $is_available_raw === 'on' || $is_available_raw === 'true' || $is_available_raw === true || intval($is_available_raw) === 1) ? 1 : 0;
-            
+
             $name = sanitize_input($_POST['name'] ?? '');
             $desc = sanitize_input($_POST['mainDescription'] ?? '');
-            $options = $_POST['sizes'] ?? '[]'; 
-            
-            // ✅ التحقق من البيانات المطلوبة
+            $options = $_POST['sizes'] ?? '[]';
+
+
             if (empty($name)) throw new Exception('اسم المنتج مطلوب ولا يمكن أن يكون فارغاً.');
             if (empty($desc)) throw new Exception('وصف المنتج مطلوب.');
             if ($sell_price <= 0) throw new Exception('سعر البيع يجب أن يكون أكبر من صفر.');
-            
-            // 3. معالجة التصنيف مع دعم الفئات المتداخلة (فئة داخل فئة داخل فئة... بلا حد للعمق)
-            // ✅ الفئات الجديدة لا تُحفظ في قاعدة البيانات إلا هنا، أي فقط لحظة نشر/حفظ المنتج فعلياً.
-            //    قبل ذلك تبقى الفئات المُضافة من الواجهة "معلّقة" في المتصفح فقط ولا تُسجَّل أبداً.
-            // ✅ كل عملية بحث/إنشاء/تحقق من فئة تكون مقيدة بهذا التاجر (user_id) فقط، بحيث لا يرى
-            //    تاجر فئات تاجر آخر ولا يتم الخلط بينها حتى لو تشابهت الأسماء.
+
+
+
+
+
+
             $category_id_input = sanitize_input($_POST['category_id'] ?? '');
             $category_id = null;
             $category_name = 'عام';
 
             if ($category_id_input === 'NEW_CHAIN') {
-                // صيغة جديدة: سلسلة كاملة من الفئات المتداخلة غير المحفوظة بعد
-                // category_chain_names: ["الأب", "الابن", "الحفيد", ...] من الأعلى إلى الأدنى
-                // category_anchor_id: معرف فئة حقيقية موجودة مسبقاً تُربط بها السلسلة (أو 0 إن كانت فئة رئيسية جديدة بالكامل)
+
+
+
                 $chain_raw = $_POST['category_chain_names'] ?? '[]';
                 $chain_names = json_decode($chain_raw, true);
                 $anchor_id = (int)($_POST['category_anchor_id'] ?? 0);
 
-                // تحقق أن نقطة الربط (إن وُجدت) تعود فعلاً لهذا التاجر أو فئة عامة مشتركة
+
                 $parent_id = 0;
                 if ($anchor_id > 0) {
                     $stmt_anchor = $pdo->prepare("SELECT id FROM categories WHERE id = ? AND (user_id = ? OR user_id IS NULL)");
@@ -4450,15 +4342,15 @@ try {
                         $cat_step_name = sanitize_input($cat_step_name);
                         if ($cat_step_name === '') continue;
 
-                        // ✅ نستخدم دالة مقاومة للأعطال بدل إدخال مباشر، حتى لا يفشل نشر
-                        // المنتج بخطأ قاعدة بيانات عام إن تكرر اسم الفئة مع تاجر آخر
+
+
                         $parent_id = resolve_or_create_category($pdo, $cat_step_name, $parent_id, $user_id);
                         $category_name = $cat_step_name;
                     }
                     $category_id = $parent_id > 0 ? $parent_id : null;
                 }
             } else if (strpos($category_id_input, 'NEW_CAT:') === 0) {
-                // (توافق قديم لطلبات من نسخة واجهة سابقة) — صيغة: NEW_CAT:parent_id::اسم_الفئة
+
                 $parts = explode('::', substr($category_id_input, 8));
                 $parent_id = (int)($parts[0] ?? 0);
                 $category_name = sanitize_input($parts[1] ?? '');
@@ -4470,11 +4362,11 @@ try {
                 }
 
                 if (!empty($category_name)) {
-                    // ✅ نفس الدالة المقاومة للأعطال، بدل إدخال مباشر قد يفشل بخطأ قاعدة بيانات
+
                     $category_id = resolve_or_create_category($pdo, $category_name, $parent_id, $user_id);
                 }
             } else if (is_numeric($category_id_input)) {
-                // فئة موجودة مسبقاً — تحقق من ملكيتها (تعود لهذا التاجر أو فئة عامة مشتركة)
+
                 $candidate_id = (int)$category_id_input;
                 $stmt_cat = $pdo->prepare("SELECT id, name FROM categories WHERE id = ? AND (user_id = ? OR user_id IS NULL)");
                 $stmt_cat->execute([$candidate_id, $user_id]);
@@ -4484,20 +4376,20 @@ try {
                     $category_id = (int)$row_cat['id'];
                     $category_name = $row_cat['name'];
                 } else {
-                    // فئة غير موجودة أو لا تعود لهذا التاجر — لا نسمح بربط المنتج بها
+
                     $category_id = null;
                     $category_name = 'عام';
                 }
             }
-            
-            // معالجة الميزات/الخصائص (حتى 10 ميزات)
+
+
             $features = [];
             for ($i = 1; $i <= 10; $i++) {
                 $feature_key = "feature_key_$i";
                 $feature_value = "feature_value_$i";
                 $key = sanitize_input($_POST[$feature_key] ?? '');
                 $value = sanitize_input($_POST[$feature_value] ?? '');
-                
+
                 if (!empty($key) && !empty($value)) {
                     $features[] = [
                         'key' => $key,
@@ -4507,7 +4399,7 @@ try {
             }
             $features_json = json_encode($features, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
 
-            // 4. رفع الصورة بأمان
+
             $img = sanitize_input($_POST['existing_image'] ?? '');
             if (isset($_FILES['image_file']) && $_FILES['image_file']['error'] === UPLOAD_ERR_OK) {
                 $validation_result = validate_image_upload($_FILES['image_file']);
@@ -4517,10 +4409,10 @@ try {
 
                 $env_keys = getenv('IMGBB_KEYS') ?: $_ENV['IMGBB_KEYS'] ?? '';
                 if (empty($env_keys)) throw new Exception("مفتاح رفع الصور مفقود من إعدادات السيرفر.");
-                
+
                 $keys_array = array_map('trim', explode(',', $env_keys));
-                $api_key = $keys_array[array_rand($keys_array)]; 
-                
+                $api_key = $keys_array[array_rand($keys_array)];
+
                 $ch = curl_init();
                 curl_setopt($ch, CURLOPT_URL, "https://api.imgbb.com/1/upload?key=" . $api_key);
                 curl_setopt($ch, CURLOPT_POST, true);
@@ -4530,55 +4422,55 @@ try {
                 curl_setopt($ch, CURLOPT_POSTFIELDS, ['image' => new CURLFile($_FILES['image_file']['tmp_name'], $mime, $filename)]);
                 $result = json_decode(curl_exec($ch), true);
                 curl_close($ch);
-                
+
                 if ($result && isset($result['data']['url'])) {
                     $img = $result['data']['url'];
                 } else {
                     throw new Exception("فشل رفع الصورة لمركز الرفع.");
                 }
             }
-            
+
             if (empty($img)) throw new Exception("يجب توفير صورة للمنتج.");
 
             if (!$is_edit && $sell_price <= $cost_price) {
                 throw new Exception('سعر البيع يجب أن يكون أعلى من التكلفة.');
             }
 
-    // 5. الحفظ المباشر والآمن في قاعدة بيانات TiDB Cloud (PDO)
+
             if ($is_edit) {
-                // استبدل استعلام الـ UPDATE القديم بهذا:
-                $sql = "UPDATE products SET 
-                        name = ?, description = ?, price = ?, cost_price = ?, discount = ?, 
-                        image = ?, type = ?, options = ?, features = ?, quantity = ?, quantity_type = ?, 
+
+                $sql = "UPDATE products SET
+                        name = ?, description = ?, price = ?, cost_price = ?, discount = ?,
+                        image = ?, type = ?, options = ?, features = ?, quantity = ?, quantity_type = ?,
                         is_available = ?, currency = ?, updated_at = ?, category_id = ?, approval_status = 'approved'
                         WHERE id = ? AND merchant_id = ?";
                 $params = [
-                    $name, $desc, $sell_price, $cost_price, $discount_percent, 
-                    $img, $category_name, $options, $features_json, $quantity, $quantity_type, 
+                    $name, $desc, $sell_price, $cost_price, $discount_percent,
+                    $img, $category_name, $options, $features_json, $quantity, $quantity_type,
                     $is_available, $currency, time(), $category_id, $pid, $user_id
                 ];
                 $stmt_save = $pdo->prepare($sql);
                 $stmt_save->execute($params);
             } else {
-                // استبدل استعلام الـ INSERT القديم بهذا:
-$sql = "INSERT INTO products 
-        (id, merchant_id, name, description, price, cost_price, discount, image, type, options, features, quantity, quantity_type, is_available, currency, updated_at, category_id, approval_status) 
+
+$sql = "INSERT INTO products
+        (id, merchant_id, name, description, price, cost_price, discount, image, type, options, features, quantity, quantity_type, is_available, currency, updated_at, category_id, approval_status)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'approved')";
 $params = [
-    $pid, $user_id, $name, $desc, $sell_price, $cost_price, $discount_percent, 
-    $img, $category_name, $options, $features_json, $quantity, $quantity_type, 
+    $pid, $user_id, $name, $desc, $sell_price, $cost_price, $discount_percent,
+    $img, $category_name, $options, $features_json, $quantity, $quantity_type,
     $is_available, $currency, time(), $category_id
 ];
                 $stmt_save = $pdo->prepare($sql);
                 $stmt_save->execute($params);
             }
 
-            // =======================================================
-            // 🚀 6. حيلة FastCGI: إرسال الاستجابة للتاجر فوراً وإنهاء الاتصال
-            //    قبل تنفيذ trigger_cache_rebuild، حتى لا ينتظر المتصفح
-            //    عملية الرفع إلى GitHub (التي أصبحت أسرع بفضل الـ Batch Upload
-            //    لكنها قد تستغرق ثانية أو أكثر حسب حجم المتجر).
-            // =======================================================
+
+
+
+
+
+
             $merchant_username = $_SESSION['username'] ?? get_username_by_id($pdo, $user_id);
 
             send_response_and_continue_in_background('success', [
@@ -4586,14 +4478,14 @@ $params = [
                 'id' => $pid
             ]);
 
-            // من هنا فصاعداً: اتصال الـ HTTP مع التاجر قد انتهى فعلياً،
-            // وأي كود ينفَّذ الآن يعمل في الخلفية بهدوء دون أن ينتظره المتصفح.
+
+
             trigger_cache_rebuild($user_id, $merchant_username);
             exit();
-      
+
         case 'force_sync_to_firebase':
             if ($user_role !== 'merchant') throw new Exception("غير مصرح لك.");
-            
+
             $m_username = $_SESSION['username'];
             $sync_count = 0;
 
@@ -4603,17 +4495,17 @@ $params = [
             if ($m_data) {
                 $m_data['settings'] = json_decode($m_data['settings'] ?: '{}', true);
                 sync_to_firebase($m_username, 'info', null, $m_data, 'PUT');
-                
-                // ⭐ إجبار تحديث ملف info.json على GitHub أيضاً
+
+
                 sync_merchant_info_json($pdo, $user_id, $m_username);
             }
 
-            // تعديل الاستعلام للمزامنة من جدول المنتجات الأساسي
+
             $sql_prods = "SELECT p.id as global_product_id, p.name, p.description, p.image, p.options, p.discount, p.department, p.category_id, p.price, p.quantity, p.quantity_type, p.currency, p.type, u.id as merchant_id, u.username as merchant_username, u.store_name as merchant_name FROM products p JOIN users u ON p.merchant_id = u.id WHERE p.merchant_id = ? AND p.is_available = 1";
             $stmt_p = $pdo->prepare($sql_prods);
             $stmt_p->execute([$user_id]);
             $products = $stmt_p->fetchAll(PDO::FETCH_ASSOC);
-            
+
             $fb_products = [];
             foreach ($products as $p) {
                 $p['options'] = json_decode($p['options'] ?? '[]', true) ?: [];
@@ -4625,11 +4517,11 @@ $params = [
                 kv_request("stores/$m_username/products", 'PUT', $fb_products);
             }
 
-            // بدلاً من رفع الطلبات لفايربيس، نرسل إشارة للمتصفح ليقوم بسحبها من الـ API المحمي
+
             sync_to_firebase($m_username, "signals/orders_updated", null, time(), 'PUT');
 
             send_response('success', ['message' => "تم رفع $sync_count منتج وإعدادات المتجر إلى Firebase بنجاح!"]);
-            break;      
+            break;
 
         case 'get_global_catalog':
             if ($user_role !== 'merchant') {
@@ -4638,7 +4530,7 @@ $params = [
             $term = sanitize_input($input['term'] ?? '');
 
             $sql = "
-                SELECT 
+                SELECT
                     p.id, p.name, p.image, p.sizes as options, c.name as type,
                     l.id as listing_id
                 FROM products p
@@ -4656,7 +4548,7 @@ $params = [
             }
 
             $sql .= " ORDER BY p.name ASC LIMIT 100";
-            
+
             $stmt = $pdo->prepare($sql);
             $stmt->execute($params);
             $products = $stmt->fetchAll(PDO::FETCH_ASSOC);
@@ -4666,7 +4558,7 @@ $params = [
                 $product['options'] = json_decode($product['options'] ?? '[]', true);
                 unset($product['listing_id']);
             }
-            
+
             send_response('success', ['data' => $products]);
             break;
 
@@ -4674,7 +4566,7 @@ $params = [
             if ($user_role !== 'merchant') {
                 throw new Exception("هذه الخاصية متاحة للتجار فقط.");
             }
-            
+
             $stmt_check_type = $pdo->prepare("SELECT store_name, store_type, settings FROM users WHERE id = ?");
             $stmt_check_type->execute([$user_id]);
             $u_data = $stmt_check_type->fetch(PDO::FETCH_ASSOC);
@@ -4705,7 +4597,7 @@ $params = [
             if (!$global_product) {
                 throw new Exception("المنتج المحدد غير موجود في الكتالوج العام أو لم تتم الموافقة عليه بعد.");
             }
-            
+
             $price_variables = null;
             if (!empty($selected_options_ids) && is_array($selected_options_ids)) {
                 $global_options = json_decode($global_product['options'] ?? '[]', true);
@@ -4720,23 +4612,23 @@ $params = [
                 $stmt->execute([$user_id, $global_id, $merchant_price, $cost_price, $quantity, $quantity_type, $is_available, $price_variables]);
                 send_response('success', ['message' => 'تمت إضافة المنتج إلى متجرك بنجاح.']);
             } catch (PDOException $e) {
-                if ($e->errorInfo[1] == 1062) { throw new Exception("لقد قمت بإضافة هذا المنتج إلى متجرك مسبقاً."); } 
+                if ($e->errorInfo[1] == 1062) { throw new Exception("لقد قمت بإضافة هذا المنتج إلى متجرك مسبقاً."); }
                 else { throw $e; }
             }
             break;
 
         case 'list_products':
             if (!$user_id) send_response('error',['message' => 'غير مصرح'], 401);
-            
+
             $term = strtolower(sanitize_input($input['term'] ?? ''));
             $page = max(1, (int)($input['page'] ?? 1));
-            $limit = max(1, min(100, (int)($input['limit'] ?? 15))); 
+            $limit = max(1, min(100, (int)($input['limit'] ?? 15)));
             $offset = ($page - 1) * $limit;
-            
+
             $merged_products = [];
             $seen_ids = [];
 
-            // 1. استرجاع المنتجات من TiDB Cloud (PDO) مباشرة دون الحاجة لـ D1
+
             try {
                 $sql_tidb = "SELECT * FROM products WHERE merchant_id = ?";
                 $params_tidb = [$user_id];
@@ -4762,10 +4654,10 @@ $params = [
                     }
                 }
             } catch (Exception $e) {
-                // تجاوز الخطأ لضمان تواصل العمل
+
             }
 
-            // 2. الدعم العكسي للمنتجات التي ما زالت مخزنة بنمط Listings
+
             try {
                 $sql_mysql = "
                     SELECT p.id as global_product_id, p.name, p.mainDescription as description, p.image, p.sizes as options, p.discount,
@@ -4792,7 +4684,7 @@ $params = [
                 foreach($legacy_products as $p) {
                     $pid = (string)$p['global_product_id'];
                     if (!in_array($pid, $seen_ids)) {
-                        $p['id'] = $pid; 
+                        $p['id'] = $pid;
                         $p['options'] = json_decode($p['options'] ?? '[]', true);
                         if ($user_role === 'delivery') unset($p['cost_price']);
                         $merged_products[] = $p;
@@ -4801,7 +4693,7 @@ $params = [
                 }
             } catch (Exception $e) {}
 
-            // ترتيب زمني للنتائج المدمجة
+
             usort($merged_products, function($a, $b) {
                 $timeA = isset($a['updated_at']) && is_numeric($a['updated_at']) ? $a['updated_at'] : 0;
                 $timeB = isset($b['updated_at']) && is_numeric($b['updated_at']) ? $b['updated_at'] : 0;
@@ -4816,8 +4708,8 @@ $params = [
 
         case 'get_product':
             if (!$user_id) send_response('error',['message' => 'غير مصرح'], 401);
-            
-            $sql = "SELECT p.*, c.name as type FROM products p LEFT JOIN categories c ON p.category_id = c.id WHERE p.id = ?"; 
+
+            $sql = "SELECT p.*, c.name as type FROM products p LEFT JOIN categories c ON p.category_id = c.id WHERE p.id = ?";
             $params =[sanitize_input($input['id'])];
             if ($user_role === 'merchant' || $user_role === 'delivery') { $sql .= " AND p.merchant_id = ?"; $params[] = $user_id; }
             $stmt = $pdo->prepare($sql); $stmt->execute($params); $prod = $stmt->fetch(PDO::FETCH_ASSOC);
@@ -4828,15 +4720,15 @@ $params = [
                 }
 
                 if ($user_role === 'delivery') unset($prod['cost_price']);
-                
-                $options_data = json_decode($prod['options'] ?? '[]', true); 
-                if (is_array($options_data)) { 
-                    foreach($options_data as &$opt) { 
-                        if (isset($opt['size_name']) && !isset($opt['name'])) { 
-                            $opt['name'] = $opt['size_name']; 
-                            unset($opt['size_name']); 
-                        } 
-                    } 
+
+                $options_data = json_decode($prod['options'] ?? '[]', true);
+                if (is_array($options_data)) {
+                    foreach($options_data as &$opt) {
+                        if (isset($opt['size_name']) && !isset($opt['name'])) {
+                            $opt['name'] = $opt['size_name'];
+                            unset($opt['size_name']);
+                        }
+                    }
                 }
                 $prod['options'] = $options_data;
                 send_response('success',['data' => $prod]);
@@ -4846,23 +4738,23 @@ $params = [
 
         case 'review_product':
             if ($user_role !== 'admin') throw new Exception("غير مصرح. هذه الصلاحية للإدارة فقط.");
-            
+
             $pid = sanitize_input($input['id']);
-            $status = sanitize_input($input['approval_status']); 
-            
+            $status = sanitize_input($input['approval_status']);
+
             if (!in_array($status,['approved', 'rejected'])) {
                 throw new Exception("حالة مراجعة غير صالحة.");
             }
-            
+
             $isAvailable = ($status === 'approved') ? 1 : 0;
-            
+
             $stmt = $pdo->prepare("UPDATE products SET approval_status = ?, isAvailable = ? WHERE id = ?");
             $stmt->execute([$status, $isAvailable, $pid]);
-            
+
             if($status === 'approved') {
                 $pdo->prepare("UPDATE merchant_listings SET is_available = 1 WHERE global_product_id = ?")->execute([$pid]);
             }
-            
+
             flag_cache_for_rebuild($user_id ?? null);
             send_response('success',['message' => 'تم تحديث حالة مراجعة المنتج بنجاح.']);
             break;
@@ -4872,45 +4764,45 @@ $params = [
             $product_id = sanitize_input($input['id']);
             $merchant_username = $_SESSION['username'] ?? get_username_by_id($pdo, $user_id);
 
-            // 1. فحص أمني: هل المنتج ضمن طلب نشط حالياً عند زبون؟
-            $search1 = '%"product_id":"' . $product_id . '"%'; 
+
+            $search1 = '%"product_id":"' . $product_id . '"%';
             $stmt_check = $pdo->prepare("SELECT ticket_id FROM live_tickets WHERE merchant_id = ? AND status IN ('pending_merchant_approval', 'confirmed_by_store', 'accepted_by_delivery', 'out_for_delivery') AND ticket_data LIKE ? LIMIT 1");
             $stmt_check->execute([$user_id, $search1]);
-            
+
             if ($stmt_check->fetch()) {
                 throw new Exception("لا يمكنك حذف هذا المنتج حالياً لأنه موجود ضمن طلب نشط للزبائن. قم بإنهاء الطلب أو إلغائه أولاً.");
             }
 
-            // 2. الحذف من قاعدة بيانات TiDB مباشرة
+
             $stmt_del = $pdo->prepare("DELETE FROM products WHERE id = ? AND merchant_id = ?");
             $stmt_del->execute([$product_id, $user_id]);
 
-            // 🚀 3. حيلة FastCGI: إرسال الاستجابة فوراً للتاجر قبل إعادة بناء
-            //    الكاش السحابي (رفع الملفات إلى GitHub) والحذف من Firebase،
-            //    حتى لا ينتظر المتصفح هذه العمليات الثانوية.
+
+
+
             send_response_and_continue_in_background('success', ['message' => 'تم حذف المنتج نهائياً بنجاح.']);
 
-            // من هنا فصاعداً: الاتصال مع التاجر انتهى فعلياً، والعمليات التالية
-            // تعمل في الخلفية بهدوء.
+
+
             trigger_cache_rebuild($user_id, $merchant_username);
 
-            // 4. الحذف من Firebase إن وجد
+
             fb_request("stores/$merchant_username/products/$product_id.json", 'DELETE');
 
             exit();
 
         case 'toggle_availability':
             if (!$user_id || $user_role !== 'merchant') send_response('error',['message' => 'غير مصرح'], 401);
-            
+
             $product_id = sanitize_input($input['id']);
             $req_status = (int)$input['isAvailable'] ? 1 : 0;
             $merchant_username = $_SESSION['username'] ?? get_username_by_id($pdo, $user_id);
 
-            // 1. تحديث الحالة في TiDB Cloud بأمان
+
             $stmt_toggle = $pdo->prepare("UPDATE products SET is_available = ?, updated_at = ? WHERE id = ? AND merchant_id = ?");
             $stmt_toggle->execute([$req_status, time(), $product_id, $user_id]);
 
-            // 🚀 2. حيلة FastCGI: إرسال الاستجابة فوراً ثم إعادة بناء الكاش في الخلفية
+
             send_response_and_continue_in_background('success', ['message' => 'تم تحديث حالة عرض المنتج (إخفاء/إظهار) بنجاح.']);
 
             trigger_cache_rebuild($user_id, $merchant_username);
@@ -4918,18 +4810,18 @@ $params = [
 
         case 'add_quantity':
             if (!$user_id || $user_role !== 'merchant') send_response('error',['message' => 'غير مصرح لك.'], 401);
-            
+
             $product_id = sanitize_input($input['productId']);
             $size_id = sanitize_input($input['sizeId'] ?? null);
             $qty_to_add = (int)$input['quantity'];
-            
+
             if ($qty_to_add <= 0) {
                 throw new Exception("يجب إدخال كمية صحيحة أكبر من الصفر.");
             }
-            
+
             $merchant_username = $_SESSION['username'] ?? get_username_by_id($pdo, $user_id);
 
-            // 1. سحب بيانات المنتج من TiDB لضمان البيانات الحقيقية
+
             $stmt_p = $pdo->prepare("SELECT quantity, quantity_type, options FROM products WHERE id = ? AND merchant_id = ?");
             $stmt_p->execute([$product_id, $user_id]);
             $d1_products = $stmt_p->fetchAll(PDO::FETCH_ASSOC);
@@ -4937,18 +4829,18 @@ $params = [
             if (empty($d1_products)) {
                 throw new Exception("المنتج غير موجود أو لا تملك صلاحية التعديل عليه.");
             }
-            
+
             $product = $d1_products[0];
             if ($product['quantity_type'] !== 'tracked') {
                 throw new Exception("هذا المنتج غير محدود الكمية، لا حاجة لإضافة مخزون.");
             }
 
-            // 2. الحساب الآمن داخل السيرفر
+
             if (!empty($size_id)) {
                 $options = json_decode($product['options'] ?: '[]', true);
                 $found = false;
-                $new_total_qty = 0; 
-                
+                $new_total_qty = 0;
+
                 foreach ($options as &$opt) {
                     if (isset($opt['id']) && $opt['id'] === $size_id) {
                         $opt['quantity'] = (int)($opt['quantity'] ?? 0) + $qty_to_add;
@@ -4956,22 +4848,22 @@ $params = [
                     }
                     $new_total_qty += (int)($opt['quantity'] ?? 0);
                 }
-                unset($opt); 
-                
+                unset($opt);
+
                 if (!$found) throw new Exception("المقاس أو الخيار المحدد غير موجود ضمن هذا المنتج.");
-                
+
                 $new_options_json = json_encode($options, JSON_UNESCAPED_UNICODE);
-                
-                // تحديث TiDB بالمقاسات الجديدة
+
+
                 $stmt_upd = $pdo->prepare("UPDATE products SET quantity = ?, options = ?, updated_at = ? WHERE id = ? AND merchant_id = ?");
                 $stmt_upd->execute([$new_total_qty, $new_options_json, time(), $product_id, $user_id]);
             } else {
-                // منتج عادي لا يحتوي خيارات
+
                 $stmt_upd = $pdo->prepare("UPDATE products SET quantity = quantity + ?, updated_at = ? WHERE id = ? AND merchant_id = ?");
                 $stmt_upd->execute([$qty_to_add, time(), $product_id, $user_id]);
             }
 
-            // 🚀 3. حيلة FastCGI: إرسال الاستجابة فوراً ثم إعادة بناء الكاش في الخلفية
+
             send_response_and_continue_in_background('success', ['message' => 'تمت إضافة الكمية للمخزون بنجاح ✅']);
 
             trigger_cache_rebuild($user_id, $merchant_username);
@@ -4979,14 +4871,14 @@ $params = [
 
         case 'process_sale':
             if (!$user_id || $user_role !== 'merchant') send_response('error',['message' => 'غير مصرح'], 401);
-            
-            $pid = sanitize_input($input['productId']); 
-            $size_id = sanitize_input($input['sizeId'] ?? null); 
+
+            $pid = sanitize_input($input['productId']);
+            $size_id = sanitize_input($input['sizeId'] ?? null);
             $qty_to_sell = (int)$input['quantity'];
-            
+
             if ($qty_to_sell <= 0) throw new Exception("الكمية غير صالحة.");
 
-            // 1. جلب بيانات المنتج من TiDB بأمان
+
             $stmt_sel = $pdo->prepare("SELECT * FROM products WHERE id = ? AND merchant_id = ?");
             $stmt_sel->execute([$pid, $user_id]);
             $product_res = $stmt_sel->fetchAll(PDO::FETCH_ASSOC);
@@ -4998,60 +4890,60 @@ $params = [
                 throw new Exception("الكمية غير متوفرة في المخزون.");
             }
 
-            // 2. حساب السعر الحقيقي الخالي من التلاعب
-            $price = $product['price'] * (1 - (($product['discount']??0)/100)); 
+
+            $price = $product['price'] * (1 - (($product['discount']??0)/100));
             $options = json_decode($product['options'] ?? '[]', true);
             if ($size_id && is_array($options)) {
                 foreach($options as $opt) {
                     if($opt['id'] == $size_id && isset($opt['custom_price'])) $price = $opt['custom_price'];
                 }
             }
-            
-            $total = $price * $qty_to_sell; 
-            $cost = ($product['cost_price']??0) * $qty_to_sell; 
+
+            $total = $price * $qty_to_sell;
+            $cost = ($product['cost_price']??0) * $qty_to_sell;
             $sid = 'SALE-' . generate_uuid();
-            
-            // 3. خصم الكمية من TiDB بأمان (عملية ذرية)
+
+
             if ($product['quantity_type'] === 'tracked') {
                 $stmt_upd = $pdo->prepare("UPDATE products SET quantity = quantity - ? WHERE id = ? AND merchant_id = ? AND quantity >= ?");
                 $stmt_upd->execute([$qty_to_sell, $pid, $user_id, $qty_to_sell]);
             }
-            
-            // 4. تسجيل المبيعات في TiDB
-            $stmt_ins = $pdo->prepare("INSERT INTO sales_log (id, user_id, product_id, size_id, quantity, price_per_item, total_price, currency, cost_at_sale) 
+
+
+            $stmt_ins = $pdo->prepare("INSERT INTO sales_log (id, user_id, product_id, size_id, quantity, price_per_item, total_price, currency, cost_at_sale)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
             $stmt_ins->execute([$sid, $user_id, $pid, $size_id, $qty_to_sell, $price, $total, $product['currency'], $cost]);
-            
+
             send_response('success',['message' => 'تمت العملية وتحديث المخزون بنجاح', 'saleId' => $sid]);
             break;
-            
+
         case 'get_returnable_sales':
             if (!$user_id) send_response('error',['message' => 'غير مصرح'], 401);
             $term = sanitize_input($input['term'] ?? '');
             $sql = "SELECT s.id, s.timestamp, p.name as productName, s.size_id, p.options as sizes, (s.quantity - IFNULL((SELECT SUM(quantity) FROM sales_log WHERE original_sale_id = s.id AND type = 'return'), 0)) as returnable_qty FROM sales_log s JOIN products p ON s.product_id = p.id WHERE s.type = 'sale' AND (s.quantity - IFNULL((SELECT SUM(quantity) FROM sales_log WHERE original_sale_id = s.id AND type = 'return'), 0)) > 0";
             $params =[];
             if ($user_role === 'merchant' || $user_role === 'delivery') { $sql .= " AND s.user_id = ?"; $params[] = $user_id; }
-            if ($term) { 
-                $sql .= " AND (s.id LIKE ? OR p.name LIKE ?)"; 
-                $safe_term = "%" . escape_like_search($term) . "%"; 
-                $params[] = $safe_term; 
-                $params[] = $safe_term; 
+            if ($term) {
+                $sql .= " AND (s.id LIKE ? OR p.name LIKE ?)";
+                $safe_term = "%" . escape_like_search($term) . "%";
+                $params[] = $safe_term;
+                $params[] = $safe_term;
             }
             $sql .= " ORDER BY s.timestamp DESC LIMIT 50";
             $stmt = $pdo->prepare($sql); $stmt->execute($params); $sales = $stmt->fetchAll(PDO::FETCH_ASSOC);
-            foreach($sales as &$sale) { 
-                if ($sale['size_id'] && $sale['sizes']) { 
-                    $options = json_decode($sale['sizes'], true); 
-                    if (is_array($options)) { 
-                        foreach($options as $option) { 
-                            if (isset($option['id']) && $option['id'] === $sale['size_id']) { 
-                                $sale['size_name'] = $option['name'] ?? ($option['size_name'] ?? ''); 
-                                break; 
-                            } 
-                        } 
-                    } 
-                } 
-                unset($sale['sizes']); 
+            foreach($sales as &$sale) {
+                if ($sale['size_id'] && $sale['sizes']) {
+                    $options = json_decode($sale['sizes'], true);
+                    if (is_array($options)) {
+                        foreach($options as $option) {
+                            if (isset($option['id']) && $option['id'] === $sale['size_id']) {
+                                $sale['size_name'] = $option['name'] ?? ($option['size_name'] ?? '');
+                                break;
+                            }
+                        }
+                    }
+                }
+                unset($sale['sizes']);
             }
             send_response('success',['data' => $sales]);
             break;
@@ -5064,7 +4956,7 @@ $params = [
             if ($user_role === 'delivery') {
                 throw new Exception("غير مصرح لك. يرجى استخدام المسارات المخصصة لتحديث حالات التوصيل.");
             }
-            
+
             if ($user_role !== 'admin') {
                 throw new Exception("هذا الإجراء مخصص للإدارة فقط.");
             }
@@ -5079,61 +4971,61 @@ $params = [
             if ($action === 'update_order_status') {
                 $new_status = sanitize_input($input['status'] ?? '');
                 if (empty($new_status)) throw new Exception("الحالة الجديدة مفقودة.");
-                
+
                 $sql = "UPDATE live_tickets SET status = ? WHERE ticket_id = ?";
                 $stmt = $pdo->prepare($sql);
                 $stmt->execute([$new_status, $order_id]);
-                
+
                 if ($stmt->rowCount() === 0) {
                     $sql = "UPDATE orders SET status = ? WHERE id = ?";
                     $stmt = $pdo->prepare($sql);
                     $stmt->execute([$new_status, $order_id]);
                 }
-                
+
                 $message = "تم تحديث حالة الطلب من قبل الإدارة بنجاح.";
-            } 
+            }
             elseif ($action === 'verify_order_generate_code') {
                 $new_code = rand(1000, 9999);
-                
+
                 $sql = "UPDATE live_tickets SET delivery_code = ? WHERE ticket_id = ?";
                 $stmt = $pdo->prepare($sql);
                 $stmt->execute([$new_code, $order_id]);
-                
+
                 if ($stmt->rowCount() === 0) {
                     $sql = "UPDATE orders SET delivery_code = ? WHERE id = ?";
                     $stmt = $pdo->prepare($sql);
                     $stmt->execute([$new_code, $order_id]);
                 }
-                
+
                 $message = "تم إعادة توليد كود التسليم بنجاح.";
                 $extra_data = ['new_code' => $new_code];
             }
 
-            if ($stmt && $stmt->rowCount() > 0) { 
-                send_response('success', array_merge(['message' => $message], $extra_data)); 
-            } else { 
-                throw new Exception('لم يتم العثور على الطلب أو أن الحالة لم تتغير.'); 
+            if ($stmt && $stmt->rowCount() > 0) {
+                send_response('success', array_merge(['message' => $message], $extra_data));
+            } else {
+                throw new Exception('لم يتم العثور على الطلب أو أن الحالة لم تتغير.');
             }
             break;
 
         case 'merchant_approve_order':
-            // 🔒 معطّل عمداً: موافقة التاجر على الطلب صارت عبر update_order_status بالـ Worker.
+
             send_response('error', ['message' => 'هذا الإجراء لم يعد متاحاً من هنا.'], 410);
-    
+
             if ($user_role !== 'merchant') throw new Exception("غير مصرح لك.");
             $order_id = sanitize_input($input['order_id']);
-            
+
             $sql = "UPDATE live_tickets SET status = 'confirmed_by_store' WHERE ticket_id = ? AND merchant_id = ?";
             $stmt = $pdo->prepare($sql);
             $stmt->execute([$order_id, $user_id]);
-            
+
             if ($stmt->rowCount() > 0) {
-                // ⭐ تعديل أمني: إرسال إشارة تحديث بدلاً من البيانات الكاملة
+
                 $m_username = $_SESSION['username'] ?? get_username_by_id($pdo, $user_id);
-                sync_to_firebase($m_username, "signals/orders_updated", null, time(), 'PUT');     
+                sync_to_firebase($m_username, "signals/orders_updated", null, time(), 'PUT');
                 update_order_tracking($m_username, $order_id, 'confirmed_by_store');
-                sync_ticket_status_to_worker($order_id, 'confirmed_by_store'); // ⭐ مزامنة الحالة إلى D1
-                
+                sync_ticket_status_to_worker($order_id, 'confirmed_by_store');
+
                 send_response('success', ['message' => 'تمت الموافقة على الطلب وجاري تجهيزه.']);
             } else {
                 $check = $pdo->prepare("SELECT status FROM live_tickets WHERE ticket_id = ?");
@@ -5147,82 +5039,82 @@ $params = [
             break;
 
         case 'merchant_update_order_status':
-            // 🔒 معطّل عمداً: تحديث حالة الطلب صار عبر update_order_status بالـ Worker.
+
             send_response('error', ['message' => 'هذا الإجراء لم يعد متاحاً من هنا.'], 410);
             if ($user_role !== 'merchant') throw new Exception("غير مصرح.");
             $order_id = sanitize_input($input['order_id']);
             $new_status = sanitize_input($input['status']);
-            
+
             $sql = "UPDATE live_tickets SET status = ? WHERE ticket_id = ? AND merchant_id = ?";
             $stmt = $pdo->prepare($sql);
             $stmt->execute([$new_status, $order_id, $user_id]);
-            
+
             if ($stmt->rowCount() > 0) {
                 $get_order = $pdo->prepare("SELECT ticket_data FROM live_tickets WHERE ticket_id = ?");
                 $m_username = $_SESSION['username'] ?? get_username_by_id($pdo, $user_id);
-                // تحديث جرس الإشعارات فقط
+
                 sync_to_firebase($m_username, "signals/orders_updated", null, time(), 'PUT');
                 update_order_tracking($m_username, $order_id, $new_status);
-                sync_ticket_status_to_worker($order_id, $new_status); // ⭐ مزامنة الحالة إلى D1
+                sync_ticket_status_to_worker($order_id, $new_status);
                 send_response('success',['message' => 'تم تحديث حالة الطلب بنجاح.']);
             }
             else throw new Exception("فشل تحديث الحالة.");
             break;
 
         case 'merchant_confirm_delivery_code':
-            // 🔒 معطّل عمداً: تأكيد التسليم صار عبر confirm_delivery_code بالـ Worker.
+
             send_response('error', ['message' => 'هذا الإجراء لم يعد متاحاً من هنا.'], 410);
             if ($user_role !== 'merchant') throw new Exception("غير مصرح لك.");
             $ticket_id = sanitize_input($input['order_id']);
             $code = sanitize_input($input['code']);
-            
+
             if(!$code || strlen($code) !== 4) throw new Exception("يرجى إدخال الكود المكون من 4 أرقام.");
 
             try {
                 $pdo->beginTransaction();
-                $stmt = $pdo->prepare("SELECT delivery_code, status, ticket_data, customer_id FROM live_tickets WHERE ticket_id = ? AND merchant_id = ? FOR UPDATE"); 
-                $stmt->execute([$ticket_id, $user_id]); 
+                $stmt = $pdo->prepare("SELECT delivery_code, status, ticket_data, customer_id FROM live_tickets WHERE ticket_id = ? AND merchant_id = ? FOR UPDATE");
+                $stmt->execute([$ticket_id, $user_id]);
                 $ticket = $stmt->fetch(PDO::FETCH_ASSOC);
-                
+
                 if (!$ticket) throw new Exception("الطلب غير موجود أو تم تسليمه مسبقاً.");
                 if ($ticket['status'] !== 'out_for_delivery') throw new Exception("يجب أن يكون الطلب في حالة 'خرج للتوصيل' أولاً.");
                 if ($ticket['delivery_code'] != $code) throw new Exception("كود التسليم غير صحيح. يرجى المراجعة مع العميل.");
-                
+
                 $ticket_data = json_decode($ticket['ticket_data'], true);
                 $items = $ticket_data['items'] ?? [];
                 $currency = $ticket_data['financials']['currency'] ?? 'YER';
                 $grand_total = $ticket_data['financials']['grand_total'] ?? 0;
 
                 foreach ($items as $item) {
-                    $sid = 'SALE-' . generate_uuid(); 
-                    $total_price = $item['price'] * $item['quantity']; 
+                    $sid = 'SALE-' . generate_uuid();
+                    $total_price = $item['price'] * $item['quantity'];
                     $cost_at_sale = $item['cost_price'] * $item['quantity'];
-                    
+
                     $log_stmt = $pdo->prepare("INSERT INTO sales_log (id, user_id, product_id, size_id, quantity, price_per_item, total_price, currency, type, cost_at_sale, order_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'sale', ?, ?)");
                     $log_stmt->execute([$sid, $user_id, $item['product_id'], $item['size_id'], $item['quantity'], $item['price'], $total_price, $currency, $cost_at_sale, $ticket_id]);
                 }
-                
+
                 $archive_stmt = $pdo->prepare("INSERT INTO orders_archive (ticket_id, customer_id, merchant_id, final_status, total_amount, archived_data) VALUES (?, ?, ?, 'completed', ?, ?)");
                 $archive_stmt->execute([$ticket_id, $ticket['customer_id'], $user_id, $grand_total, json_encode($ticket_data, JSON_UNESCAPED_UNICODE)]);
 
                 $pdo->prepare("DELETE FROM live_tickets WHERE ticket_id = ?")->execute([$ticket_id]);
-                
+
                 $pdo->commit();
 
                 $m_username = $_SESSION['username'] ?? get_username_by_id($pdo, $user_id);
-                // إرسال إشارة للمتصفح بجلب البيانات المحدثة
+
                 sync_to_firebase($m_username, "signals/orders_updated", null, time(), 'PUT');
                 update_order_tracking($m_username, $ticket_id, 'completed');
-                sync_ticket_status_to_worker($ticket_id, 'completed'); // ⭐ مزامنة الحالة إلى D1
-                
+                sync_ticket_status_to_worker($ticket_id, 'completed');
+
                 send_response('success',['message' => 'تم تأكيد التسليم بنجاح وتوثيق الأرباح في رصيدك!']);
-                
-            } catch (Exception $e) { 
-                if ($pdo->inTransaction()) $pdo->rollBack(); 
-                throw $e; 
+
+            } catch (Exception $e) {
+                if ($pdo->inTransaction()) $pdo->rollBack();
+                throw $e;
             }
             break;
-             
+
         case 'get_financial_report':
             if (!$user_id) send_response('error',['message' => 'غير مصرح'], 401);
             $params =[]; $user_condition = "";
@@ -5236,36 +5128,36 @@ $params = [
             foreach ($currencies as $curr) { $r = $revenue[$curr] ?? 0; $c = $cogs[$curr] ?? 0; $e = $expenses[$curr] ?? 0; $gross[$curr] = $r - $c; $net[$curr] = $gross[$curr] - $e; }
             send_response('success',['data' =>['totalRevenue' => $revenue, 'cogs' => $cogs, 'totalExpenses' => $expenses, 'grossProfit' => $gross, 'netProfit' => $net ]]);
             break;
-            
+
         case 'get_stats':
             if (!$user_id) send_response('error',['message' => 'غير مصرح'], 401);
             $params =[]; $user_condition = "";
             if ($user_role === 'merchant' || $user_role === 'delivery') { $user_condition = " AND s.user_id = ?"; $params[] = $user_id; }
             $daily_sql = "SELECT DATE(s.timestamp) as date, s.currency, SUM(s.total_price) as total, COUNT(s.id) as count FROM sales_log s WHERE s.type='sale' AND s.timestamp >= DATE_SUB(NOW(), INTERVAL 7 DAY) $user_condition GROUP BY date, s.currency ORDER BY date DESC";
             $daily_stmt = $pdo->prepare($daily_sql); $daily_stmt->execute($params);
-            
+
             $sales_log_sql = "SELECT s.id, s.quantity, s.total_price, s.currency, s.timestamp, p.name as productName FROM sales_log s JOIN products p ON s.product_id = p.id WHERE s.type='sale' $user_condition ORDER BY s.timestamp DESC LIMIT 20";
             $sales_log_stmt = $pdo->prepare($sales_log_sql); $sales_log_stmt->execute($params);
-            
+
             $returns_log_sql = "SELECT s.id, s.quantity, s.total_price, s.currency, s.timestamp, p.name as productName FROM sales_log s JOIN products p ON s.product_id = p.id WHERE s.type='return' $user_condition ORDER BY s.timestamp DESC LIMIT 20";
             $returns_log_stmt = $pdo->prepare($returns_log_sql); $returns_log_stmt->execute($params);
-            
+
             send_response('success',['data' =>[ 'daily' => $daily_stmt->fetchAll(PDO::FETCH_ASSOC), 'salesLog' => $sales_log_stmt->fetchAll(PDO::FETCH_ASSOC), 'returnsLog' => $returns_log_stmt->fetchAll(PDO::FETCH_ASSOC) ]]);
             break;
-            
+
         case 'add_expense':
             if ($user_role !== 'admin') throw new Exception("المصروفات خاصة بالمدير فقط.");
             $stmt = $pdo->prepare("INSERT INTO expenses (user_id, expense_date, category, description, amount, currency) VALUES (?, ?, ?, ?, ?, ?)");
             $stmt->execute([$user_id, sanitize_input($input['expense_date']), sanitize_input($input['category']), sanitize_input($input['description'] ?? ''), (float)$input['amount'], sanitize_input($input['currency'])]);
             send_response('success',['message' => 'تم الحفظ']);
             break;
-            
+
         case 'get_expenses':
             if ($user_role !== 'admin') throw new Exception("المصروفات خاصة بالمدير فقط.");
             $sql = "SELECT id, user_id, expense_date, category, description, amount, currency, created_at FROM expenses ORDER BY expense_date DESC"; $stmt = $pdo->query($sql);
             send_response('success',['data' => $stmt->fetchAll(PDO::FETCH_ASSOC)]);
             break;
-            
+
         case 'delete_expense':
             if ($user_role !== 'admin') throw new Exception("المصروفات خاصة بالمدير فقط.");
             $sql = "DELETE FROM expenses WHERE id = ?"; $stmt = $pdo->prepare($sql); $stmt->execute([sanitize_input($input['id'])]);
@@ -5279,16 +5171,16 @@ $params = [
             $pdo->prepare("INSERT INTO settings (setting_key, setting_value) VALUES ('store_settings', ?) ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)")->execute([$json]);
             send_response('success',['message' => 'تم الحفظ']);
             break;
-            
+
         case 'get_settings':
             $stmt = $pdo->query("SELECT setting_value FROM settings WHERE setting_key = 'store_settings'");
             $val = $stmt->fetchColumn();
             send_response('success',['data' =>['store_settings' => json_decode($val ?: '{}', true)]]);
             break;
-        
+
         case 'verify_pin':
             if ($user_role !== 'admin') throw new Exception("للمدير فقط");
-            
+
             define('MAX_PIN_ATTEMPTS', 3);
             define('PIN_LOCKOUT_MINUTES', 15);
 
@@ -5317,7 +5209,7 @@ $params = [
                 throw new Exception("رمز PIN غير صحيح. المحاولة رقم " . $_SESSION['pin_attempts'] . " من " . MAX_PIN_ATTEMPTS . ".");
             }
             break;
-             
+
         case 'update_pin':
             if ($user_role !== 'admin') throw new Exception("للمدير فقط");
             $current = $input['current_pin']; $new = $input['new_pin']; $confirm = $input['confirm_new_pin'];
@@ -5338,7 +5230,7 @@ $params = [
             $pdo->prepare("UPDATE users SET username = ? WHERE id = ?")->execute([$new_username, $user_id]); $_SESSION['username'] = $new_username;
             send_response('success',['message' => 'تم تحديث اسم المستخدم. سيتم تحديث الصفحة.']);
             break;
-        
+
         case 'update_admin_password':
         case 'update_merchant_password':
             if (!$user_id) send_response('error',[], 401);
@@ -5347,15 +5239,15 @@ $params = [
             if (!password_verify($current, $stmt->fetchColumn())) throw new Exception("كلمة المرور الحالية خاطئة.");
             if (strlen($new) < 8) throw new Exception("كلمة المرور الجديدة قصيرة جداً.");
             $hashed = password_hash($new, PASSWORD_DEFAULT);
-            
-            // تحديث كلمة المرور وتسجيل وقت التحديث
+
+
             try { $pdo->exec("ALTER TABLE users ADD COLUMN password_changed_at DATETIME NULL"); } catch(Exception $e){}
             $pdo->prepare("UPDATE users SET password = ?, password_changed_at = NOW() WHERE id = ?")->execute([$hashed, $user_id]);
-            
-            // جلب بصمة الجهاز الحالي الذي قام بتغيير الباسورد لكي لا يتم طرده
+
+
             $current_device_token = $_SESSION['current_device_token'] ?? $_COOKIE['device_token'] ?? '';
-            
-            // حذف جـمـيـع الأجهزة والجلسات السابقة المرتبطة بهذا التاجر باستثناء جهازه الحالي
+
+
             $pdo->prepare("DELETE FROM trusted_devices WHERE user_id = ? AND device_token != ?")->execute([$user_id, $current_device_token]);
 
             send_response('success',['message' => 'تم تحديث كلمة المرور بنجاح. تم طرد وتسجيل الخروج من جميع الأجهزة الأخرى فوراً.']);
@@ -5364,18 +5256,18 @@ $params = [
         case 'get_customers':
             if ($user_role !== 'admin') throw new Exception("للمدير فقط");
             $term = sanitize_input($input['term'] ?? '');
-            
+
             $sql = "SELECT c.id, c.full_name, c.phone, c.address, c.is_verified, c.is_active, c.created_at, (SELECT COUNT(*) FROM orders WHERE customer_id = c.id) as order_count FROM customers c";
             $params =[];
-            if ($term) { 
-                $sql .= " WHERE c.full_name LIKE ? OR c.phone LIKE ?"; 
-                $safe_term = "%" . escape_like_search($term) . "%"; 
-                $params =[$safe_term, $safe_term]; 
+            if ($term) {
+                $sql .= " WHERE c.full_name LIKE ? OR c.phone LIKE ?";
+                $safe_term = "%" . escape_like_search($term) . "%";
+                $params =[$safe_term, $safe_term];
             }
             $stmt = $pdo->prepare($sql); $stmt->execute($params);
             send_response('success',['data' => $stmt->fetchAll(PDO::FETCH_ASSOC)]);
             break;
-            
+
         case 'get_customer_details':
             if ($user_role !== 'admin') throw new Exception("للمدير فقط");
             $stmt = $pdo->prepare("SELECT id, full_name, phone, address FROM customers WHERE id = ?"); $stmt->execute([sanitize_input($input['id'])]);
@@ -5383,7 +5275,7 @@ $params = [
             if ($customer) send_response('success',['data' => $customer]);
             throw new Exception("المستخدم غير موجود");
             break;
-            
+
         case 'update_customer_details':
             if ($user_role !== 'admin') throw new Exception("للمدير فقط");
 
@@ -5392,36 +5284,36 @@ $params = [
 
             $sql = "UPDATE customers SET full_name = ?, phone = ?, address = ? WHERE id = ?";
             $pdo->prepare($sql)->execute([
-                sanitize_input($safe_input['full_name'] ?? ''), 
-                sanitize_input($safe_input['phone'] ?? ''), 
-                sanitize_input($safe_input['address'] ?? ''), 
+                sanitize_input($safe_input['full_name'] ?? ''),
+                sanitize_input($safe_input['phone'] ?? ''),
+                sanitize_input($safe_input['address'] ?? ''),
                 sanitize_input($safe_input['id'] ?? '')
             ]);
             send_response('success',['message' => 'تم تحديث بيانات المستخدم']);
             break;
-            
+
         case 'toggle_customer_status':
             if ($user_role !== 'admin') throw new Exception("للمدير فقط");
             $status_val = (int)$input['status'];
             $customer_id_to_toggle = sanitize_input($input['id']);
             $pdo->prepare("UPDATE customers SET is_active = ? WHERE id = ?")->execute([$status_val, $customer_id_to_toggle]);
-            
+
             if ($status_val == 0) {
                 $pdo->prepare("DELETE FROM auth_tokens WHERE user_id = ?")->execute([$customer_id_to_toggle]);
             }
-            
+
             send_response('success',['message' => 'تم تحديث حالة المستخدم']);
             break;
-            
+
         case 'admin_reset_customer_password':
             if ($user_role !== 'admin') throw new Exception("للمدير فقط");
             $new_pass = !empty($input['new_password']) ? $input['new_password'] : bin2hex(random_bytes(4));
             $hashed = password_hash($new_pass, PASSWORD_DEFAULT);
             $customer_id_to_reset = sanitize_input($input['id']);
             $pdo->prepare("UPDATE customers SET password = ? WHERE id = ?")->execute([$hashed, $customer_id_to_reset]);
-            
+
             $pdo->prepare("DELETE FROM auth_tokens WHERE user_id = ?")->execute([$customer_id_to_reset]);
-            
+
             send_response('success',['message' => 'تمت إعادة التعيين، وتم طرد العميل من كافة الأجهزة لاحتياطات الأمان.', 'new_password' => $new_pass]);
             break;
 
@@ -5431,24 +5323,24 @@ $params = [
             $stmt = $pdo->query($sql);
             send_response('success',['data' => $stmt->fetchAll(PDO::FETCH_ASSOC)]);
             break;
-            
+
         case 'add_merchant':
             if ($user_role !== 'admin') throw new Exception("للمدير فقط");
 
             $allowed_fields =['username', 'store_name', 'password', 'phone', 'location'];
             $safe_input = filter_allowed_keys($input, $allowed_fields);
 
-            $u = sanitize_input($safe_input['username'] ?? ''); 
-            $s = sanitize_input($safe_input['store_name'] ?? ''); 
-            $p = $safe_input['password'] ?? ''; 
-            $phone = sanitize_input($safe_input['phone'] ?? ''); 
-            $role = 'merchant'; 
+            $u = sanitize_input($safe_input['username'] ?? '');
+            $s = sanitize_input($safe_input['store_name'] ?? '');
+            $p = $safe_input['password'] ?? '';
+            $phone = sanitize_input($safe_input['phone'] ?? '');
+            $role = 'merchant';
             $location = sanitize_input($safe_input['location'] ?? null);
-            
+
             if (!empty($location) && !is_valid_gps_location($location)) {
                 throw new Exception("رابط موقع المتجر غير صالح أو يقع خارج النطاق الجغرافي المسموح به.");
             }
-            
+
             $settings_json = json_encode(['location' => $location]);
 
             if (empty($u) || empty($s) || empty($p) || empty($phone)) throw new Exception("الرجاء ملء جميع الحقول.");
@@ -5459,49 +5351,49 @@ $params = [
             $pdo->prepare("INSERT INTO users (username, password, store_name, phone, role, settings) VALUES (?, ?, ?, ?, ?, ?)")->execute([$u, $hashed_pass, $s, $phone, $role, $settings_json]);
             send_response('success',['message' => 'تمت إضافة المستخدم بنجاح']);
             break;
-        
+
         case 'update_merchant':
             if ($user_role !== 'admin') throw new Exception("للمدير فقط");
 
             $allowed_fields =['id', 'username', 'store_name', 'password', 'phone', 'location'];
             $safe_input = filter_allowed_keys($input, $allowed_fields);
 
-            $id = sanitize_input($safe_input['id'] ?? ''); 
-            $u = sanitize_input($safe_input['username'] ?? ''); 
-            $s = sanitize_input($safe_input['store_name'] ?? ''); 
-            $p = $safe_input['password'] ?? null; 
-            $phone = sanitize_input($safe_input['phone'] ?? ''); 
-            $role = 'merchant'; 
+            $id = sanitize_input($safe_input['id'] ?? '');
+            $u = sanitize_input($safe_input['username'] ?? '');
+            $s = sanitize_input($safe_input['store_name'] ?? '');
+            $p = $safe_input['password'] ?? null;
+            $phone = sanitize_input($safe_input['phone'] ?? '');
+            $role = 'merchant';
             $location = sanitize_input($safe_input['location'] ?? null);
-            
+
             if (!empty($location) && !is_valid_gps_location($location)) {
                 throw new Exception("رابط موقع المتجر غير صالح أو يقع خارج النطاق الجغرافي المسموح به.");
             }
-            
+
             $settings_json = json_encode(['location' => $location]);
 
             if (empty($u) || empty($s) || empty($id) || empty($phone)) throw new Exception("بيانات غير مكتملة.");
             $check = $pdo->prepare("SELECT id FROM users WHERE username = ? AND id != ?"); $check->execute([$u, $id]); if ($check->fetch()) throw new Exception("اسم المستخدم الجديد موجود مسبقاً.");
-            
+
             $sql = "UPDATE users SET username = ?, store_name = ?, phone = ?, role = ?, settings = ?";
             $params =[$u, $s, $phone, $role, $settings_json];
-            
+
             if (!empty($p)) {
                 if (strlen($p) < 8) throw new Exception("كلمة المرور يجب أن تكون 8 أحرف على الأقل.");
                 $hashed_pass = password_hash($p, PASSWORD_DEFAULT);
                 $sql .= ", password = ?";
                 $params[] = $hashed_pass;
             }
-            
+
             $sql .= " WHERE id = ?";
             $params[] = $id;
 
             $pdo->prepare($sql)->execute($params);
-            
+
             if (!empty($p)) {
                 $pdo->prepare("DELETE FROM trusted_devices WHERE user_id = ?")->execute([$id]);
             }
-            
+
             send_response('success',['message' => 'تم تحديث بيانات المستخدم']);
             break;
 
@@ -5509,14 +5401,14 @@ $params = [
             if ($user_role !== 'admin') throw new Exception("للمدير فقط");
             $id = sanitize_input($input['id']); $status = (int)$input['status'];
             $pdo->prepare("UPDATE users SET is_active = ? WHERE id = ? AND role != 'admin'")->execute([$status, $id]);
-            
+
             if ($status == 0) {
                 $pdo->prepare("DELETE FROM trusted_devices WHERE user_id = ?")->execute([$id]);
             }
-            
+
             send_response('success',['message' => 'تم تحديث حالة المستخدم']);
             break;
-            
+
         case 'delete_merchant':
             if ($user_role !== 'admin') throw new Exception("للمدير فقط");
             $merchant_id = sanitize_input($input['id']);
@@ -5533,33 +5425,33 @@ $params = [
             if (!$user_id || !in_array($user_role, ['merchant', 'delivery'])) {
                 send_response('error', ['message' => 'غير مصرح لك بالوصول'], 401);
             }
-            // ✅ إصلاح: جلب بيانات شاملة تشمل بيانات التسجيل الأولي
+
             $stmt = $pdo->prepare("SELECT id, username, store_name, phone, store_type, settings, created_at FROM users WHERE id = ?");
             $stmt->execute([$user_id]);
             $merchantData = $stmt->fetch(PDO::FETCH_ASSOC);
-            
+
             if ($merchantData) {
-                // ✅ فك تشفير settings مع ضمان القيمة الافتراضية
+
                 if (!empty($merchantData['settings'])) {
                     $decoded = json_decode($merchantData['settings'], true);
                     $merchantData['settings'] = is_array($decoded) ? $decoded : [];
                 } else {
                     $merchantData['settings'] = [];
                 }
-                
-                // ✅ إرجاع علم is_first_login ليعرف الفرونت أنه تسجيل أول
+
+
                 $merchantData['is_first_login'] = empty($merchantData['store_name']) || $merchantData['store_name'] === $merchantData['username'];
-                
-                // ✅ حساب طابع زمني للكاش ليعرف الفرونت متى يجدد
+
+
                 $merchantData['data_fetched_at'] = time();
-                
+
                 send_response('success', ['data' => $merchantData]);
             } else {
                 throw new Exception("لم يتم العثور على بيانات الحساب.");
             }
             break;
         case 'merchant_cancel_order':
-            // 🔒 معطّل عمداً: إلغاء الطلب صار عبر cancel_order بالـ Worker.
+
             send_response('error', ['message' => 'هذا الإجراء لم يعد متاحاً من هنا.'], 410);
             if ($user_role !== 'merchant') throw new Exception("غير مصرح لك.");
             $order_id = sanitize_input($input['order_id']);
@@ -5568,7 +5460,7 @@ $params = [
 
             try {
                 $pdo->beginTransaction();
-                
+
                 $stmt = $pdo->prepare("SELECT ticket_id, customer_id, ticket_data, status FROM live_tickets WHERE ticket_id = ? AND merchant_id = ? FOR UPDATE");
                 $stmt->execute([$order_id, $user_id]);
                 $ticket = $stmt->fetch(PDO::FETCH_ASSOC);
@@ -5584,7 +5476,7 @@ $params = [
                 $grand_total = $ticket_data['financials']['grand_total'] ?? 0;
                 $archive_stmt->execute([$order_id, $ticket['customer_id'], $user_id, $grand_total, json_encode($ticket_data, JSON_UNESCAPED_UNICODE)]);
 
-                // 1. استرجاع الكميات إلى قاعدة بيانات TiDB Cloud (PDO) مباشرة
+
                 $items = $ticket_data['items'] ?? [];
                 $inventory_changed = false;
 
@@ -5592,19 +5484,19 @@ $params = [
                     $pid = $item['product_id'];
                     $qty = (int)$item['quantity'];
                     $size_id = $item['size_id'] ?? null;
-                    
-                    // جلب المنتج من TiDB للتأكد من نوع الكمية وصحتها
+
+
                     $stmt_prod_check = $pdo->prepare("SELECT quantity_type, options FROM products WHERE id = ? AND merchant_id = ?");
                     $stmt_prod_check->execute([$pid, $user_id]);
                     $db_prod = $stmt_prod_check->fetch(PDO::FETCH_ASSOC);
-                    
+
                     if ($db_prod && $db_prod['quantity_type'] === 'tracked') {
                         $inventory_changed = true;
 
                         if (!empty($size_id)) {
                             $options_array = json_decode($db_prod['options'] ?: '[]', true);
                             $total_remaining_qty = 0;
-                            
+
                             foreach ($options_array as &$opt) {
                                 if (isset($opt['id']) && $opt['id'] === $size_id) {
                                     $opt['quantity'] = (int)($opt['quantity'] ?? 0) + $qty;
@@ -5612,7 +5504,7 @@ $params = [
                                 $total_remaining_qty += (int)($opt['quantity'] ?? 0);
                             }
                             unset($opt);
-                            
+
                             $stmt_upd_prod = $pdo->prepare("UPDATE products SET quantity = ?, options = ?, updated_at = ? WHERE id = ? AND merchant_id = ?");
                             $stmt_upd_prod->execute([$total_remaining_qty, json_encode($options_array, JSON_UNESCAPED_UNICODE), time(), $pid, $user_id]);
                         } else {
@@ -5625,15 +5517,15 @@ $params = [
                 $pdo->prepare("DELETE FROM live_tickets WHERE ticket_id = ?")->execute([$order_id]);
                 $pdo->commit();
 
-                // 🚀 2. تحديث الكاش السحابي تلقائياً بعد استرجاع المخزون
+
                 if ($inventory_changed) {
                     trigger_cache_rebuild($user_id, $merchant_username);
                 }
 
-        // 3. إرسال إشارة تنبيه للمتصفح لتحديث الواجهة عبر الـ API
+
                 sync_to_firebase($merchant_username, "signals/orders_updated", null, time(), 'PUT');
                 update_order_tracking($merchant_username, $order_id, 'cancelled');
-                sync_ticket_status_to_worker($order_id, 'cancelled'); // ⭐ مزامنة الحالة إلى D1
+                sync_ticket_status_to_worker($order_id, 'cancelled');
 
                 send_response('success', ['message' => 'تم إلغاء الطلب بنجاح وإعادة المنتجات للمخزون.']);
             } catch (Exception $e) {
@@ -5643,8 +5535,8 @@ $params = [
             break;
 
         case 'worker_sync_new_order':
-            // 🔒 معطّل عمداً (2026-07-22): لم يعد الـ Worker يستدعي هذا المسار، لأن
-            // إنشاء/إدارة الطلبات بالكامل صار على D1 مباشرة بدون كتابة موازية على TiDB.
+
+
             send_response('error', ['message' => 'هذا الإجراء لم يعد متاحاً من هنا.'], 410);
             $sync_key_header = $_SERVER['HTTP_X_INTERNAL_KEY'] ?? '';
             $sync_expected_key = getenv('INTERNAL_SYNC_KEY') ?: ($_ENV['INTERNAL_SYNC_KEY'] ?? '');
@@ -5678,9 +5570,9 @@ $params = [
             break;
 
         case 'worker_sync_settings':
-            // ⚠️ هذا المسار لا يُستدعى من الواجهة أبداً - فقط من الـ Worker نفسه
-            // (بعد أن يحفظ إعدادات التاجر في D1) ليُبقي TiDB متزامنة لأجل
-            // تطبيقي المندوب والإدارة اللذين ما زالا يقرآن من TiDB مباشرة.
+
+
+
             $internal_key_header = $_SERVER['HTTP_X_INTERNAL_KEY'] ?? '';
             $expected_internal_key = getenv('INTERNAL_SYNC_KEY') ?: ($_ENV['INTERNAL_SYNC_KEY'] ?? '');
             if (empty($expected_internal_key) || !hash_equals($expected_internal_key, $internal_key_header)) {
@@ -5698,14 +5590,11 @@ $params = [
             $stmt_sync = $pdo->prepare("UPDATE users SET store_name = ?, store_type = ?, settings = ? WHERE id = ?");
             $stmt_sync->execute([$sync_store_name, $sync_store_type, $sync_settings_json, $sync_uid]);
 
-            // ⚠️ إصلاح: ما عاد نستدعي sync_merchant_info_json هنا. هذا المسار
-            // (worker_sync_settings) هدفه فقط إبقاء TiDB متزامنة لتطبيقي المندوب
-            // والإدارة - كتابة info.json لواجهة المتجر العامة يتكفل بها الـ Worker
-            // نفسه عبر syncStoreInfoToStorefront (بالتوازي مع هذا الطلب بالضبط).
-            // الاستدعاء القديم هنا كان يكتب نفس الملف بصيغة JSON مختلفة (مسطّحة
-            // بدون مفتاح "data") من مصدر غير متسلسل مع طابور الـ Worker، فيصير
-            // تصادم: أي كتابة توصل GitHub متأخرة تمحو حقول الكتابة الثانية بصمت -
-            // وهذا سبب ظهور اسم المتجر فقط واختفاء بقية البيانات من info.json.
+
+            $sync_username = get_username_by_id($pdo, $sync_uid);
+            if ($sync_username && function_exists('sync_merchant_info_json')) {
+                try { sync_merchant_info_json($pdo, $sync_uid, $sync_username); } catch (Throwable $e) {}
+            }
 
             send_response('success', ['message' => 'تمت مزامنة الإعدادات مع TiDB بنجاح']);
             break;
@@ -5714,10 +5603,10 @@ $params = [
             if ($user_role !== 'merchant') {
                 throw new Exception("غير مصرح لك بالقيام بهذا الإجراء.");
             }
-            
-            $storeName = sanitize_input($input['storeName'] ?? ''); 
+
+            $storeName = sanitize_input($input['storeName'] ?? '');
             $storeType = sanitize_input($input['storeType'] ?? null);
-            $new_settings = $input['settings'] ?? []; 
+            $new_settings = $input['settings'] ?? [];
 
             if (empty($storeName)) {
                 throw new Exception("اسم المتجر مطلوب ولا يمكن أن يكون فارغاً.");
@@ -5745,14 +5634,14 @@ $params = [
             }
 
             $final_settings = array_merge($current_settings, $new_settings);
-            
+
             if (empty($final_settings['location'])) $final_settings['location'] = $current_settings['location'] ?? null;
             if (empty($final_settings['phone'])) $final_settings['phone'] = $current_settings['phone'] ?? ($user_record['phone'] ?? null);
 
             $sql_update = "UPDATE users SET store_name = ?, store_type = ?, settings = ? WHERE id = ?";
             $stmt_update = $pdo->prepare($sql_update);
 
-            // ⭐ تعديل أمني: استعلام مجهز لتأمين جلب اسم المستخدم للتاجر
+
             $merchant_username = $_SESSION['username'] ?? get_username_by_id($pdo, $user_id);
             $fb_settings = [
                 'store_name' => $storeName,
@@ -5760,24 +5649,24 @@ $params = [
                 'settings' => $final_settings
             ];
             $json_settings = json_encode($final_settings, JSON_UNESCAPED_UNICODE);
-            
-            // استدعاء الدالة لتوليد ملف info.json ورفعه مع المانيفست
-            // 1. أولاً: نقوم بتحديث قاعدة البيانات بالبيانات الجديدة
+
+
+
             $stmt_update->execute([
-                $storeName, 
-                $storeType ?: $user_record['store_type'], 
-                $json_settings, 
+                $storeName,
+                $storeType ?: $user_record['store_type'],
+                $json_settings,
                 $user_id
             ]);
 
-            // 2. ثانياً: نستدعي الدالة لتقرأ البيانات الجديدة من القاعدة وترفعها لـ GitHub
+
             sync_merchant_info_json($pdo, $user_id, $merchant_username);
 
             send_response('success', [
                 'message' => 'تم حفظ الإعدادات وتحديث المتجر بنجاح ✅',
                 'updated_settings' => $final_settings
             ]);
-            break;        
+            break;
 
         case 'get_categories':
             $sql = "SELECT name FROM categories WHERE (parent_id IS NULL OR parent_id = 0) AND (user_id IS NULL OR user_id IN (SELECT id FROM users WHERE role = 'admin')) ORDER BY name ASC";
@@ -5785,37 +5674,37 @@ $params = [
             $defaults = ['إلكترونيات', 'أزياء', 'منزل'];
             send_response('success',['data' => array_values(array_unique(array_merge($defaults, $cats)))]);
             break;
-            
+
         case 'get_categories_tree':
             if (!$user_id) send_response('error',['message' => 'غير مصرح'], 401);
-            
+
             try {
-                // ✅ كل تاجر يستلم فقط فئاته الخاصة (user_id = هو) + الفئات العامة المشتركة (user_id = NULL)
+
                 $tree = build_category_tree($pdo, $user_id);
                 send_response('success',['data' => $tree]);
             } catch (PDOException $e) {
                 send_response('success',['data' => []]);
             }
             break;
-            
+
         case 'create_category':
-            // ⚠️ ملاحظة: لوحة التاجر لم تعد تستدعي هذا المسار عند إضافة منتج جديد —
-            // إنشاء الفئات (بما فيها الفئات المتداخلة) أصبح يُؤجَّل ويُنفَّذ فقط داخل
-            // save_product عند نشر المنتج فعلياً، لتفادي تراكم فئات فارغة في قاعدة البيانات.
-            // يبقى هذا المسار متاحاً لأي استخدام إداري/مستقبلي آخر.
+
+
+
+
             if (!$user_id) send_response('error',['message' => 'غير مصرح'], 401);
             $name = sanitize_input($input['name'] ?? '');
             $parent_id = intval($input['parent_id'] ?? 0);
-            
+
             if (empty($name)) throw new Exception('اسم الفئة مطلوب');
-            
-            // تحقق أن الفئة الأب (إن وُجدت) تعود لنفس التاجر أو فئة عامة، منعاً لأي تلاعب
+
+
             if ($parent_id > 0) {
                 $stmt_p = $pdo->prepare("SELECT COUNT(*) FROM categories WHERE id = ? AND (user_id = ? OR user_id IS NULL)");
                 $stmt_p->execute([$parent_id, $user_id]);
                 if (!$stmt_p->fetchColumn()) $parent_id = 0;
             }
-            
+
             try {
                 $new_id = resolve_or_create_category($pdo, $name, $parent_id, $user_id);
                 send_response('success',['message' => 'تم إنشاء الفئة بنجاح', 'id' => $new_id]);
@@ -5823,16 +5712,16 @@ $params = [
                 throw new Exception('فشل إنشاء الفئة: ' . $e->getMessage());
             }
             break;
-            
+
         case 'update_category':
             if (!$user_id) send_response('error',['message' => 'غير مصرح'], 401);
             $id = intval($input['id'] ?? 0);
             $name = sanitize_input($input['name'] ?? '');
             $parent_id = intval($input['parent_id'] ?? 0);
-            
+
             if (empty($name)) throw new Exception('اسم الفئة مطلوب');
             if ($id <= 0) throw new Exception('معرّف الفئة غير صحيح');
-            
+
             try {
                 $stmt = $pdo->prepare("UPDATE categories SET name = ?, parent_id = ? WHERE id = ? AND (user_id = ? OR user_id IS NULL)");
                 $stmt->execute([$name, $parent_id, $id, $user_id]);
@@ -5841,23 +5730,23 @@ $params = [
                 throw new Exception('فشل تحديث الفئة');
             }
             break;
-            
+
         case 'delete_category':
             if (!$user_id) send_response('error',['message' => 'غير مصرح'], 401);
             $id = intval($input['id'] ?? 0);
-            
+
             if ($id <= 0) throw new Exception('معرّف الفئة غير صحيح');
-            
+
             try {
-                // التحقق من عدم وجود منتجات أو فئات فرعية
+
                 $check_prods = $pdo->prepare("SELECT COUNT(*) FROM products WHERE category_id = ?");
                 $check_prods->execute([$id]);
                 if ($check_prods->fetchColumn() > 0) throw new Exception('لا يمكن حذف فئة تحتوي على منتجات');
-                
+
                 $check_children = $pdo->prepare("SELECT COUNT(*) FROM categories WHERE parent_id = ?");
                 $check_children->execute([$id]);
                 if ($check_children->fetchColumn() > 0) throw new Exception('لا يمكن حذف فئة تحتوي على فئات فرعية');
-                
+
                 $stmt = $pdo->prepare("DELETE FROM categories WHERE id = ? AND (user_id = ? OR user_id IS NULL)");
                 $stmt->execute([$id, $user_id]);
                 send_response('success',['message' => 'تم حذف الفئة بنجاح']);
@@ -5868,12 +5757,12 @@ $params = [
 
         case 'get_delivery_agent_stats':
             if ($user_role !== 'delivery') throw new Exception("غير مصرح لك.");
-            
+
             $earnings_stmt = $pdo->prepare("SELECT currency, SUM(delivery_fee) as total FROM orders WHERE delivery_agent_id = ? AND status = 'completed' GROUP BY currency");
             $earnings_stmt->execute([$user_id]);
             $raw_earnings = $earnings_stmt->fetchAll(PDO::FETCH_KEY_PAIR);
 
-            $total_earnings =[]; $commission_rate = 0.80; 
+            $total_earnings =[]; $commission_rate = 0.80;
             foreach($raw_earnings as $currency => $total_fee) { $total_earnings[$currency] = $total_fee * $commission_rate; }
             $completed_stmt = $pdo->prepare("SELECT COUNT(*) FROM orders WHERE delivery_agent_id = ? AND status = 'completed'");
             $completed_stmt->execute([$user_id]);
@@ -5881,35 +5770,35 @@ $params = [
 
             $daily_stmt = $pdo->prepare("SELECT DATE(created_at) as date, COUNT(*) as count FROM orders WHERE delivery_agent_id = ? AND status = 'completed' AND created_at >= CURDATE() - INTERVAL 7 DAY GROUP BY date ORDER BY date ASC");
             $daily_stmt->execute([$user_id]);
-            
-            // ⭐ تصحيح أمني وبرمجي: استبدال المتغير المتسبب في خطأ بـ $daily_stmt الصحيح لجلب البيانات
+
+
             $daily_stats = $daily_stmt->fetchAll(PDO::FETCH_ASSOC);
-            
+
             send_response('success',[ 'data' =>[ 'total_completed' => $total_completed, 'total_earnings' => $total_earnings, 'daily_stats' => $daily_stats ] ]);
             break;
 
         case 'get_available_orders':
             if ($user_role !== 'delivery') throw new Exception("غير مصرح لك.");
-            
+
             $stmt_check = $pdo->prepare("SELECT store_name FROM users WHERE id = ?");
             $stmt_check->execute([$user_id]);
             if (empty($stmt_check->fetchColumn())) {
                 throw new Exception("REQUIRE_PROFILE_UPDATE: يرجى استكمال بياناتك في الإعدادات لتتمكن من استلام الطلبات.");
             }
 
-            $page = max(1, intval($input['page'] ?? 1)); 
-            $limit = max(1, min(50, intval($input['limit'] ?? 10))); 
+            $page = max(1, intval($input['page'] ?? 1));
+            $limit = max(1, min(50, intval($input['limit'] ?? 10)));
             $offset = ($page - 1) * $limit;
-            
-            $sql = "SELECT ticket_id as id, status, created_at, ticket_data 
-                    FROM live_tickets 
-                    WHERE status = 'pending_delivery_acceptance' AND delivery_agent_id IS NULL 
+
+            $sql = "SELECT ticket_id as id, status, created_at, ticket_data
+                    FROM live_tickets
+                    WHERE status = 'pending_delivery_acceptance' AND delivery_agent_id IS NULL
                     ORDER BY created_at ASC LIMIT :limit OFFSET :offset";
 
-            $stmt = $pdo->prepare($sql); 
-            $stmt->bindValue(':limit', $limit, PDO::PARAM_INT); 
-            $stmt->bindValue(':offset', $offset, PDO::PARAM_INT); 
-            $stmt->execute(); 
+            $stmt = $pdo->prepare($sql);
+            $stmt->bindValue(':limit', $limit, PDO::PARAM_INT);
+            $stmt->bindValue(':offset', $offset, PDO::PARAM_INT);
+            $stmt->execute();
             $tickets = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
             $orders = [];
@@ -5933,23 +5822,23 @@ $params = [
 
         case 'get_my_orders':
             if ($user_role !== 'delivery') throw new Exception("غير مصرح لك.");
-            $page = max(1, intval($input['page'] ?? 1)); 
-            $limit = max(1, min(50, intval($input['limit'] ?? 10))); 
+            $page = max(1, intval($input['page'] ?? 1));
+            $limit = max(1, min(50, intval($input['limit'] ?? 10)));
             $offset = ($page - 1) * $limit;
-            
-            $sql = "SELECT ticket_id as id, status, created_at, ticket_data 
-                    FROM live_tickets 
-                    WHERE delivery_agent_id = :user_id 
-                    ORDER BY CASE status WHEN 'accepted_by_delivery' THEN 1 WHEN 'out_for_delivery' THEN 2 ELSE 3 END, created_at DESC 
+
+            $sql = "SELECT ticket_id as id, status, created_at, ticket_data
+                    FROM live_tickets
+                    WHERE delivery_agent_id = :user_id
+                    ORDER BY CASE status WHEN 'accepted_by_delivery' THEN 1 WHEN 'out_for_delivery' THEN 2 ELSE 3 END, created_at DESC
                     LIMIT :limit OFFSET :offset";
 
-            $stmt = $pdo->prepare($sql); 
-            $stmt->bindParam(':user_id', $user_id, PDO::PARAM_INT); 
-            $stmt->bindParam(':limit', $limit, PDO::PARAM_INT); 
-            $stmt->bindParam(':offset', $offset, PDO::PARAM_INT); 
-            $stmt->execute(); 
+            $stmt = $pdo->prepare($sql);
+            $stmt->bindParam(':user_id', $user_id, PDO::PARAM_INT);
+            $stmt->bindParam(':limit', $limit, PDO::PARAM_INT);
+            $stmt->bindParam(':offset', $offset, PDO::PARAM_INT);
+            $stmt->execute();
             $tickets = $stmt->fetchAll(PDO::FETCH_ASSOC);
-            
+
             $orders = [];
             foreach ($tickets as $t) {
                 $data = json_decode($t['ticket_data'], true);
@@ -5974,7 +5863,7 @@ $params = [
 
         case 'accept_order':
             if ($user_role !== 'delivery') throw new Exception("غير مصرح لك.");
-            
+
             $stmt_check = $pdo->prepare("SELECT store_name FROM users WHERE id = ?");
             $stmt_check->execute([$user_id]);
             if (empty($stmt_check->fetchColumn())) {
@@ -5986,15 +5875,15 @@ $params = [
             if ((int)$active_orders_stmt->fetchColumn() >= DELIVERY_AGENT_MAX_ORDERS) {
                 throw new Exception("لا يمكنك قبول طلبات جديدة. لديك طلبات غير مكتملة.");
             }
-            
+
             $order_id = sanitize_input($input['order_id']);
             try {
                 $pdo->beginTransaction();
-                
-                $stmt = $pdo->prepare("SELECT status, delivery_agent_id, ticket_data FROM live_tickets WHERE ticket_id = ? FOR UPDATE"); 
-                $stmt->execute([$order_id]); 
+
+                $stmt = $pdo->prepare("SELECT status, delivery_agent_id, ticket_data FROM live_tickets WHERE ticket_id = ? FOR UPDATE");
+                $stmt->execute([$order_id]);
                 $ticket = $stmt->fetch(PDO::FETCH_ASSOC);
-                
+
                 if (!$ticket) throw new Exception("الطلب غير موجود.");
                 if ($ticket['status'] !== 'pending_delivery_acceptance' && $ticket['status'] !== 'confirmed') {
                     throw new Exception("عذراً، هذا الطلب تم قبوله من مندوب آخر أو لم يعد متاحاً.");
@@ -6002,13 +5891,13 @@ $params = [
                 if ($ticket['delivery_agent_id'] !== null) {
                     throw new Exception("عذراً، هذا الطلب مرتبط بمندوب آخر.");
                 }
-                
+
                 $data = json_decode($ticket['ticket_data'], true);
                 if (!is_array($data)) $data = [];
-                
-                // ⭐ تعديل أمني: جلب الاسم الرسمي للمندوب من قاعدة البيانات مباشرة لتفادي تزوير الجلسات
+
+
                 $delivery_agent_name = $_SESSION['store_name'] ?? get_store_name_by_id($pdo, $user_id);
-                
+
                 $data['delivery_agent'] = [
                     'id' => $user_id,
                     'name' => $delivery_agent_name
@@ -6017,28 +5906,28 @@ $params = [
 
                 $update_stmt = $pdo->prepare("UPDATE live_tickets SET delivery_agent_id = ?, status = 'accepted_by_delivery', ticket_data = ? WHERE ticket_id = ?");
                 $update_stmt->execute([$user_id, $new_json, $order_id]);
-                
+
                 $pdo->commit();
                 send_response('success',['message' => 'تم قبول الطلب بنجاح! أصبح الآن في قائمة طلباتك.']);
-            } catch (Exception $e) { 
-                if ($pdo->inTransaction()) $pdo->rollBack(); 
-                throw $e; 
+            } catch (Exception $e) {
+                if ($pdo->inTransaction()) $pdo->rollBack();
+                throw $e;
             }
             break;
 
         case 'update_delivery_order_status':
             if ($user_role !== 'delivery') throw new Exception("غير مصرح لك.");
-            $order_id = sanitize_input($input['order_id']); 
+            $order_id = sanitize_input($input['order_id']);
             $new_status = sanitize_input($input['status']);
-            
+
             if ($new_status !== 'out_for_delivery') {
                 throw new Exception("إجراء غير صالح. لإكمال الطلب استخدم تأكيد التسليم بالكود.");
             }
 
             $sql = "UPDATE live_tickets SET status = ? WHERE ticket_id = ? AND delivery_agent_id = ?";
-            $stmt = $pdo->prepare($sql); 
+            $stmt = $pdo->prepare($sql);
             $stmt->execute([$new_status, $order_id, $user_id]);
-            
+
             if ($stmt->rowCount() > 0) {
                 send_response('success',['message' => 'تم تحديث حالة الطلب.']);
             } else {
@@ -6050,7 +5939,7 @@ $params = [
             if (!$customer_id) throw new Exception("يجب تسجيل الدخول كعميل لتنفيذ هذا الإجراء.");
             $order_id = sanitize_input($input['order_id']);
             $response_action = sanitize_input($input['response_action']);
-            
+
             try {
                 $pdo->beginTransaction();
                 $stmt = $pdo->prepare("SELECT id, status, delivery_agent_id FROM orders WHERE id = ? AND customer_id = ? FOR UPDATE");
@@ -6099,69 +5988,69 @@ $params = [
 
                 $pdo->commit();
                 send_response('success',['message' => $msg]);
-            } catch(Exception $e) { 
-                if ($pdo->inTransaction()) $pdo->rollBack(); 
-                throw $e; 
+            } catch(Exception $e) {
+                if ($pdo->inTransaction()) $pdo->rollBack();
+                throw $e;
             }
             break;
-            
+
         case 'confirm_delivery_with_code':
             if ($user_role !== 'delivery') throw new Exception("غير مصرح لك.");
-            $order_id = sanitize_input($input['order_id']); 
+            $order_id = sanitize_input($input['order_id']);
             $code = sanitize_input($input['code']);
             try {
                 $pdo->beginTransaction();
-                $stmt = $pdo->prepare("SELECT delivery_code, status, delivery_fee FROM orders WHERE id = ? AND delivery_agent_id = ? FOR UPDATE"); 
-                $stmt->execute([$order_id, $user_id]); 
+                $stmt = $pdo->prepare("SELECT delivery_code, status, delivery_fee FROM orders WHERE id = ? AND delivery_agent_id = ? FOR UPDATE");
+                $stmt->execute([$order_id, $user_id]);
                 $order = $stmt->fetch(PDO::FETCH_ASSOC);
-                
+
                 if (!$order) throw new Exception("الطلب غير موجود أو لا تملكه.");
                 if ($order['status'] !== 'out_for_delivery') throw new Exception("يجب أن يكون الطلب في حالة 'خرج للتوصيل' أولاً.");
                 if ($order['delivery_code'] != $code) throw new Exception("كود التسليم غير صحيح. يرجى المراجعة مع العميل.");
-                
+
                 $pdo->prepare("UPDATE orders SET status = 'completed' WHERE id = ?")->execute([$order_id]);
-                
+
                 $items_stmt = $pdo->prepare("SELECT oi.*, p.cost_price FROM order_items oi JOIN products p ON oi.product_id = p.id WHERE oi.order_id = ?");
                 $items_stmt->execute([$order_id]);
-                
+
                 foreach ($items_stmt->fetchAll(PDO::FETCH_ASSOC) as $item) {
-                    $sid = 'SALE-' . generate_uuid(); 
-                    $total = $item['price'] * $item['quantity']; 
+                    $sid = 'SALE-' . generate_uuid();
+                    $total = $item['price'] * $item['quantity'];
                     $cost = $item['cost_price'] * $item['quantity'];
-                    
+
                     $log_stmt = $pdo->prepare("INSERT INTO sales_log (id, user_id, product_id, size_id, quantity, price_per_item, total_price, currency, type, cost_at_sale, order_id) VALUES (?, ?, ?, ?, ?, ?, ?, (SELECT currency FROM orders WHERE id = ?), 'sale', ?, ?)");
                     $log_stmt->execute([$sid, $item['user_id'], $item['product_id'], $item['size_id'], $item['quantity'], $item['price'], $total, $order_id, $cost, $order_id]);
                 }
-                
+
                 $pdo->commit();
                 send_response('success',['message' => 'تم تأكيد التسليم بنجاح!']);
-            } catch (Exception $e) { 
-                if ($pdo->inTransaction()) $pdo->rollBack(); 
-                throw $e; 
+            } catch (Exception $e) {
+                if ($pdo->inTransaction()) $pdo->rollBack();
+                throw $e;
             }
             break;
-            
+
         case 'update_agent_location':
             if ($user_role !== 'delivery') throw new Exception("غير مصرح لك.");
-            $lat = filter_var($input['lat'], FILTER_VALIDATE_FLOAT); 
+            $lat = filter_var($input['lat'], FILTER_VALIDATE_FLOAT);
             $lng = filter_var($input['lng'], FILTER_VALIDATE_FLOAT);
             if ($lat === false || $lng === false) throw new Exception("إحداثيات غير صالحة.");
             $location_json = json_encode(['lat' => $lat, 'lng' => $lng]);
-            try { 
-                $pdo->exec("ALTER TABLE users ADD COLUMN last_active_at DATETIME NULL AFTER last_location"); 
+            try {
+                $pdo->exec("ALTER TABLE users ADD COLUMN last_active_at DATETIME NULL AFTER last_location");
             } catch (Exception $e) {}
-            
-            $stmt = $pdo->prepare("UPDATE users SET last_location = ?, last_active_at = NOW() WHERE id = ?"); 
+
+            $stmt = $pdo->prepare("UPDATE users SET last_location = ?, last_active_at = NOW() WHERE id = ?");
             $stmt->execute([$location_json, $user_id]);
             send_response('success',['message' => 'تم تحديث الموقع']);
             break;
 
         case 'get_agents_locations':
             if ($user_role !== 'delivery') throw new Exception("غير مصرح لك.");
-            $stmt = $pdo->prepare("SELECT id, store_name, last_location, last_active_at FROM users WHERE role = 'delivery' AND is_active = 1 AND id != ? AND last_location IS NOT NULL"); 
-            $stmt->execute([$user_id]); 
+            $stmt = $pdo->prepare("SELECT id, store_name, last_location, last_active_at FROM users WHERE role = 'delivery' AND is_active = 1 AND id != ? AND last_location IS NOT NULL");
+            $stmt->execute([$user_id]);
             $agents = $stmt->fetchAll(PDO::FETCH_ASSOC);
-            
+
             foreach ($agents as &$agent) {
                 $agent['last_location'] = json_decode($agent['last_location'], true);
                 $last_active_timestamp = !empty($agent['last_active_at']) ? strtotime($agent['last_active_at']) : 0;
@@ -6174,20 +6063,20 @@ $params = [
         case 'get_full_route_details':
             if ($user_role !== 'delivery') throw new Exception("غير مصرح لك.");
             $order_id = sanitize_input($input['order_id']);
-            $stmt_order = $pdo->prepare("SELECT o.merchant_id, o.delivery_gps_link, o.delivery_address_text, c.full_name as customer_name FROM orders o JOIN customers c ON o.customer_id = c.id WHERE o.id = ? AND o.delivery_agent_id = ?"); 
-            $stmt_order->execute([$order_id, $user_id]); 
+            $stmt_order = $pdo->prepare("SELECT o.merchant_id, o.delivery_gps_link, o.delivery_address_text, c.full_name as customer_name FROM orders o JOIN customers c ON o.customer_id = c.id WHERE o.id = ? AND o.delivery_agent_id = ?");
+            $stmt_order->execute([$order_id, $user_id]);
             $order = $stmt_order->fetch(PDO::FETCH_ASSOC);
 
             if (!$order) throw new Exception("الطلب غير موجود أو غير مخصص لك.");
-            
-            $stmt_merchant = $pdo->prepare("SELECT store_name, settings FROM users WHERE id = ?"); 
-            $stmt_merchant->execute([$order['merchant_id']]); 
+
+            $stmt_merchant = $pdo->prepare("SELECT store_name, settings FROM users WHERE id = ?");
+            $stmt_merchant->execute([$order['merchant_id']]);
             $merchant = $stmt_merchant->fetch(PDO::FETCH_ASSOC);
 
             $merchant_settings = json_decode($merchant['settings'] ?: '{}', true);
             $merchant_location_url = $merchant_settings['location'] ?? null;
 
-            $merchant_coords = extract_coords_from_url($merchant_location_url); 
+            $merchant_coords = extract_coords_from_url($merchant_location_url);
             $customer_coords = extract_coords_from_url($order['delivery_gps_link']);
 
             $customer_street = 'غير محدد';
@@ -6200,11 +6089,11 @@ $params = [
             if (!$customer_coords) throw new Exception("تعذر تحديد موقع الزبون.");
 
             send_response('success',['data' =>[
-                'merchant_location' => $merchant_coords, 
-                'merchant_name' => $merchant['store_name'], 
-                'customer_location' => $customer_coords, 
+                'merchant_location' => $merchant_coords,
+                'merchant_name' => $merchant['store_name'],
+                'customer_location' => $customer_coords,
                 'customer_name' => $order['customer_name'],
-                'customer_street' => $customer_street 
+                'customer_street' => $customer_street
             ]]);
             break;
 
@@ -6214,8 +6103,8 @@ $params = [
 
 } catch (PDOException $e) {
     error_log("Database Error in API: " . $e->getMessage());
-    // ⭐ إصلاح أمني: عدم إرجاع رسالة الخطأ الخام لقاعدة البيانات للعميل
-    // (كانت تُسرّب تفاصيل داخلية مثل أسماء الجداول والأعمدة). التفاصيل الكاملة تُسجَّل فقط في اللوق أعلاه.
+
+
     send_response('error',['message' => 'حدث خطأ في قاعدة البيانات. يرجى المحاولة لاحقاً.'], 500);
 } catch (Throwable $e) {
     $msg = $e->getMessage();
@@ -6226,12 +6115,12 @@ $params = [
     } else {
         $code = (strpos($msg, 'تغيرت الجلسة') !== false || strpos($msg, 'غير مصرح') !== false || strpos($msg, 'يجب تسجيل الدخول') !== false) ? 401 : 400;
     }
-    
+
     if (strpos($msg, 'REQUIRE_PROFILE_UPDATE:') !== false) {
         $code = 403;
         $msg = str_replace('REQUIRE_PROFILE_UPDATE:', '', $msg);
     }
-    
+
     send_response('error',['message' => trim($msg)], $code);
 }
 ?>
