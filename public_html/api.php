@@ -552,7 +552,7 @@ function send_via_macrodroid($phone, $message) {
     $url = "https://trigger.macrodroid.com/" . rawurlencode($MACRO_DEVICE_ID) . "/" . rawurlencode($MACRO_WEBHOOK_NAME);
     $ch = curl_init($url);
     curl_setopt($ch, CURLOPT_POST, true);
-    curl_setopt($ch, CURLOPT_POSTFIELDS, http_build_query(['phone' => $phone, 'msg' => $message]));
+    curl_setopt($ch, CURLOPT_POSTFIELDS, http_build_query(['phone' => $phone, 'msg' => $message], '', '&', PHP_QUERY_RFC3986));
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
     curl_setopt($ch, CURLOPT_TIMEOUT, 6);
     curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true);
