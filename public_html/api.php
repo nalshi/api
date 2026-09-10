@@ -38,7 +38,7 @@ header('Content-Type: application/json; charset=utf-8');
 header("Cache-Control: no-store, no-cache, must-revalidate, max-age=0");
 
 $allowed_origins = [
-    "*", #'https://appi.dpdns.org',
+    '*', #'https://appi.dpdns.org',
 ];
 
 $request_origin = $_SERVER['HTTP_ORIGIN'] ?? '';
