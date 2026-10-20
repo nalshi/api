@@ -318,8 +318,8 @@ function kv_request($path, $method = 'GET', $data = null) {
 
 
     $json_content  = json_encode($data, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
-    $secret_key    = getenv('APP_SECRET_KEY') ?: ($_ENV['APP_SECRET_KEY'] ?? 'default_key');
-    $data_signature = hash_hmac('sha256', $json_content, $secret_key);
+    $secret_key    = getenv('APP_SECRET_KEY') ?: ($_ENV['APP_SECRET_KEY'] ?? '');
+    $data_signature = $secret_key !== '' ? hash_hmac('sha256', $json_content, $secret_key) : 'unsigned';
     $timestamp      = date('Y-m-d H:i:s T');
 
     $payload = [
@@ -543,8 +543,63 @@ function build_otp_message($otp, $purpose_line, $valid_minutes = 5, $greeting_na
     return implode("\n", $lines);
 }
 
+function normalize_phone_for_sms($phone) {
+    $to = preg_replace('/[^0-9]/', '', (string) $phone);
+    if (strpos($to, '00') === 0) $to = substr($to, 2);
+    // رقم يمني محلي: 7XXXXXXXX أو 07XXXXXXXX -> 9677XXXXXXXX
+    if (strlen($to) === 9 && $to[0] === '7') $to = '967' . $to;
+    elseif (strlen($to) === 10 && $to[0] === '0') $to = '967' . substr($to, 1);
+    return $to;
+}
+
+// نقطة الدخول الموحدة لكل رسائل SMS. الاسم قديم للتوافق مع كل الاستدعاءات.
+// المزود يُحدد من متغير البيئة SMS_PROVIDER: nabda أو easysendsms (الافتراضي).
 function send_via_macrodroid($phone, $message) {
-    // الاسم قديم للتوافق مع كل الاستدعاءات، لكنه الآن يرسل عبر EasySendSMS
+    $provider = strtolower(getenv('SMS_PROVIDER') ?: ($_ENV['SMS_PROVIDER'] ?? 'easysendsms'));
+    if ($provider === 'nabda') {
+        return send_via_nabda($phone, $message);
+    }
+    return send_via_easysendsms($phone, $message);
+}
+
+function send_via_nabda($phone, $message) {
+    $api_key = getenv('NABDA_API_KEY') ?: ($_ENV['NABDA_API_KEY'] ?? '');
+    if (empty($api_key)) {
+        error_log("Nabda: NABDA_API_KEY غير معرّف - لم يتم إرسال SMS.");
+        return false;
+    }
+
+    $ch = curl_init("https://api.nabdaotp.com/api/v1/messages/send");
+    curl_setopt_array($ch, [
+        CURLOPT_POST           => true,
+        CURLOPT_HTTPHEADER     => [
+            "Content-Type: application/json",
+            "Accept: application/json",
+            "Authorization: " . $api_key,
+        ],
+        // لا نسجل $message لأنه يحتوي على الكود
+        CURLOPT_POSTFIELDS     => json_encode([
+            'phone'   => normalize_phone_for_sms($phone),
+            'message' => $message,
+        ], JSON_UNESCAPED_UNICODE),
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_FOLLOWLOCATION => false,   // منع تسريب المفتاح عبر إعادة التوجيه
+        CURLOPT_TIMEOUT        => 8,
+        CURLOPT_SSL_VERIFYPEER => true,
+    ]);
+    $result   = curl_exec($ch);
+    $httpcode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $err      = curl_error($ch);
+    curl_close($ch);
+
+    if ($httpcode < 200 || $httpcode >= 300) {
+        error_log("Nabda: فشل إرسال SMS (http=$httpcode, err=$err, resp=" . substr((string) $result, 0, 200) . ")");
+        return false;
+    }
+    return true;
+}
+
+function send_via_easysendsms($phone, $message) {
     $api_key = getenv('EASYSENDSMS_API_KEY') ?: ($_ENV['EASYSENDSMS_API_KEY'] ?? '');
     $sender  = getenv('EASYSENDSMS_SENDER') ?: ($_ENV['EASYSENDSMS_SENDER'] ?? 'Nalesh');
     if (empty($api_key)) {
@@ -552,9 +607,7 @@ function send_via_macrodroid($phone, $message) {
         return false;
     }
 
-    // تطبيع الرقم: 967 + 9 أرقام، بدون + أو 00
-    $to = preg_replace('/[^0-9]/', '', $phone);
-    if (strpos($to, '00967') === 0) $to = substr($to, 2);
+    $to = normalize_phone_for_sms($phone);
     if (strpos($to, '967') !== 0) $to = '967' . ltrim($to, '0');
 
     // العربي يحتاج type=1 (Unicode)
@@ -571,6 +624,7 @@ function send_via_macrodroid($phone, $message) {
         'from' => $sender, 'to' => $to, 'text' => $message, 'type' => $type
     ], JSON_UNESCAPED_UNICODE));
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_FOLLOWLOCATION, false);
     curl_setopt($ch, CURLOPT_TIMEOUT, 8);
     curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true);
     $result = curl_exec($ch);
@@ -578,11 +632,11 @@ function send_via_macrodroid($phone, $message) {
     $err = curl_error($ch);
     curl_close($ch);
 
-    $res = json_decode((string)$result, true);
+    $res = json_decode((string) $result, true);
     $ok = ($httpcode == 200 && is_array($res) && ($res['status'] ?? '') === 'OK'
            && strpos($res['messageIds'][0] ?? '', 'OK') === 0);
     if (!$ok) {
-        error_log("EasySendSMS: فشل إرسال SMS (http=$httpcode, err=$err, resp=" . substr((string)$result, 0, 200) . ")");
+        error_log("EasySendSMS: فشل إرسال SMS (http=$httpcode, err=$err, resp=" . substr((string) $result, 0, 200) . ")");
         return false;
     }
     return true;
@@ -2216,8 +2270,9 @@ try {
                 try {
                     $pdo->prepare("INSERT INTO sms_queue (phone_number, message, status) VALUES (?, ?, 'pending')")->execute([$phone, $message]);
                 } catch (PDOException $e) {}
-                send_via_macrodroid($phone, $message);
-
+                if (!send_via_macrodroid($phone, $message)) {
+                    throw new Exception('تعذر إرسال كود التحقق. يرجى المحاولة لاحقاً.');
+                }
             } else {
                 $random_pass = password_hash(bin2hex(random_bytes(8)), PASSWORD_DEFAULT);
                 $default_name = "عميل " . substr($phone, -4);
@@ -2242,7 +2297,9 @@ try {
                 try {
                     $pdo->prepare("INSERT INTO sms_queue (phone_number, message, status) VALUES (?, ?, 'pending')")->execute([$phone, $message]);
                 } catch (PDOException $e) {}
-                send_via_macrodroid($phone, $message);
+                if (!send_via_macrodroid($phone, $message)) {
+                    throw new Exception('تعذر إرسال كود التحقق. يرجى المحاولة لاحقاً.');
+                }
             }
 
 
@@ -3629,8 +3686,9 @@ try {
                     $pdo->prepare("DELETE FROM sms_queue WHERE phone_number = ?")->execute([$phone_to_check]);
                     $pdo->prepare("INSERT INTO sms_queue (phone_number, message) VALUES (?, ?)")->execute([$phone_to_check, $message]);
                 } catch(PDOException $e) {}
-                send_via_macrodroid($phone_to_check, $message);
-
+                if (!send_via_macrodroid($phone_to_check, $message)) {
+                    throw new Exception('تعذر إرسال كود التحقق. يرجى المحاولة لاحقاً.');
+                }
                 send_response('new_device_otp_required',['message' => 'تم اكتشاف محاولة دخول من جهاز جديد. يرجى إدخال رمز التحقق المرسل لجوالك.', 'state_token' => $state_token]);
             }
 
@@ -3818,8 +3876,9 @@ try {
 
             $pdo->prepare("DELETE FROM sms_queue WHERE phone_number = ?")->execute([$phone]);
             $pdo->prepare("INSERT INTO sms_queue (phone_number, message) VALUES (?, ?)")->execute([$phone, $message]);
-            send_via_macrodroid($phone, $message);
-
+            if (!send_via_macrodroid($phone, $message)) {
+                throw new Exception('تعذر إرسال كود التحقق. يرجى المحاولة لاحقاً.');
+            }
             send_response('success_otp_sent', ['state_token' => $state_token]);
             break;
 
@@ -3892,7 +3951,22 @@ try {
             sync_user_to_worker($pdo, $new_merchant_id);
 
             setcookie('state_token', '', ['expires' => time() - 3600, 'path' => '/', 'secure' => $is_secure, 'httponly' => true, 'samesite' => $is_secure ? 'None' : 'Lax']);
-            send_response('success',['message' => 'تم تفعيل حسابك بنجاح! يمكنك الآن تسجيل الدخول.']);
+
+            // تسجيل الدخول تلقائياً بعد التفعيل: نفس التوكن ونفس التحويل الذي يرجعه login
+            $login_token = generate_signed_token([
+                'user_id'      => (int) $new_merchant_id,
+                'username'     => $merchant_username,
+                'store_name'   => $payload['store_name'],
+                'role'         => $payload['role'],
+                'device_token' => $new_device_token
+            ], 5256000);
+            $login_redirect = ($payload['role'] === 'merchant') ? 'merchant-dashboard.php' : 'delivery-dashboard.php';
+
+            send_response('success', [
+                'message'  => 'تم تفعيل حسابك بنجاح!',
+                'token'    => $login_token,
+                'redirect' => $login_redirect
+            ]);
             break;
 
         case 'create_private_agent':
@@ -4124,8 +4198,9 @@ try {
 
             $pdo->prepare("DELETE FROM sms_queue WHERE phone_number = ?")->execute([$phone]);
             $pdo->prepare("INSERT INTO sms_queue (phone_number, message) VALUES (?, ?)")->execute([$phone, $message]);
-            send_via_macrodroid($phone, $message);
-
+            if (!send_via_macrodroid($phone, $message)) {
+                throw new Exception('تعذر إرسال كود التحقق. يرجى المحاولة لاحقاً.');
+            }
             send_response('success', ['state_token' => $state_token]);
             break;
 
