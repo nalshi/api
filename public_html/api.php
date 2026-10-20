@@ -538,7 +538,8 @@ function build_otp_message($otp, $purpose_line, $valid_minutes = 5, $greeting_na
     if (!empty($greeting_name)) {
         $lines[] = "مرحباً {$greeting_name}،";
     }
-    $lines[] = "{$purpose_line}: {$otp}";
+    $lines[] = "{$purpose_line}:";
+    $lines[] = (string) $otp;
     $lines[] = "صالح لمدة {$valid_minutes} دقائق. لا تشاركه مع أحد.";
     return implode("\n", $lines);
 }
