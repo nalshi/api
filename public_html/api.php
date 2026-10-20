@@ -544,24 +544,45 @@ function build_otp_message($otp, $purpose_line, $valid_minutes = 5, $greeting_na
 }
 
 function send_via_macrodroid($phone, $message) {
-    global $MACRO_DEVICE_ID, $MACRO_WEBHOOK_NAME;
-    if (empty($MACRO_DEVICE_ID) || empty($MACRO_WEBHOOK_NAME)) {
-        error_log("MacroDroid: لم يتم إرسال SMS - متغيرات البيئة MACRO_DEVICE_ID/MACRO_WEBHOOK_NAME غير مُعرَّفة.");
+    // الاسم قديم للتوافق مع كل الاستدعاءات، لكنه الآن يرسل عبر EasySendSMS
+    $api_key = getenv('EASYSENDSMS_API_KEY') ?: ($_ENV['EASYSENDSMS_API_KEY'] ?? '');
+    $sender  = getenv('EASYSENDSMS_SENDER') ?: ($_ENV['EASYSENDSMS_SENDER'] ?? 'Nalesh');
+    if (empty($api_key)) {
+        error_log("EasySendSMS: لم يتم إرسال SMS - متغير EASYSENDSMS_API_KEY غير معرّف.");
         return false;
     }
-    $url = "https://trigger.macrodroid.com/" . rawurlencode($MACRO_DEVICE_ID) . "/" . rawurlencode($MACRO_WEBHOOK_NAME);
-    $ch = curl_init($url);
+
+    // تطبيع الرقم: 967 + 9 أرقام، بدون + أو 00
+    $to = preg_replace('/[^0-9]/', '', $phone);
+    if (strpos($to, '00967') === 0) $to = substr($to, 2);
+    if (strpos($to, '967') !== 0) $to = '967' . ltrim($to, '0');
+
+    // العربي يحتاج type=1 (Unicode)
+    $type = preg_match('/[^\x20-\x7E\n]/', $message) ? '1' : '0';
+
+    $ch = curl_init("https://restapi.easysendsms.app/v1/rest/sms/send");
     curl_setopt($ch, CURLOPT_POST, true);
-    curl_setopt($ch, CURLOPT_POSTFIELDS, http_build_query(['phone' => $phone, 'msg' => $message], '', '&', PHP_QUERY_RFC3986));
+    curl_setopt($ch, CURLOPT_HTTPHEADER, [
+        "apikey: $api_key",
+        "Content-Type: application/json",
+        "Accept: application/json"
+    ]);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode([
+        'from' => $sender, 'to' => $to, 'text' => $message, 'type' => $type
+    ], JSON_UNESCAPED_UNICODE));
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_TIMEOUT, 6);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 8);
     curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true);
     $result = curl_exec($ch);
     $httpcode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
     $err = curl_error($ch);
     curl_close($ch);
-    if ($httpcode != 200 || $result === false) {
-        error_log("MacroDroid: فشل إرسال SMS (http=$httpcode, err=$err)");
+
+    $res = json_decode((string)$result, true);
+    $ok = ($httpcode == 200 && is_array($res) && ($res['status'] ?? '') === 'OK'
+           && strpos($res['messageIds'][0] ?? '', 'OK') === 0);
+    if (!$ok) {
+        error_log("EasySendSMS: فشل إرسال SMS (http=$httpcode, err=$err, resp=" . substr((string)$result, 0, 200) . ")");
         return false;
     }
     return true;
