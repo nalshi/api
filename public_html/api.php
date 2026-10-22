@@ -2170,54 +2170,7 @@ try {
             break;
 
         case 'auth_request_otp':
-            try {
-                if (empty($input['proof_token'])) throw new Exception("فشل التحقق الأمني (1).");
-
-                $parts = explode('.', $input['proof_token']);
-                if (count($parts) !== 2) throw new Exception("فشل التحقق الأمني (2).");
-
-                list($encoded_payload, $client_hash) = $parts;
-                $payload = base64_decode($encoded_payload, true);
-                if ($payload === false) throw new Exception("فشل التحقق الأمني (3).");
-
-                $payload_parts = explode('|', $payload);
-                if (count($payload_parts) !== 3) {
-                    throw new Exception("فشل التحقق الأمني (4).");
-                }
-                list($start_time, $tap_time, $nonce) = $payload_parts;
-
-                if (!is_numeric($start_time) || !is_numeric($tap_time) || empty($nonce)) {
-                    throw new Exception("فشل التحقق الأمني (5).");
-                }
-
-                $server_hash = simple_php_hash("{$start_time}|{$tap_time}|{$nonce}");
-                if ((string)$server_hash !== (string)$client_hash) {
-                    throw new Exception("فشل التحقق من صحة الطلب (مزور).");
-                }
-
-                $time_since_tap = time() - ($tap_time / 1000);
-                if ($time_since_tap < -120 || $time_since_tap > 120) {
-                    throw new Exception("انتهت صلاحية محاولة التحقق. يرجى المحاولة مرة أخرى.");
-                }
-
-                $challenge_duration = $tap_time - $start_time;
-                $required_duration = 2000;
-                $allowed_window = 400;
-
-                if ($challenge_duration < ($required_duration - $allowed_window) || $challenge_duration > ($required_duration + $allowed_window)) {
-                    throw new Exception("فشل التحقق من التوقيت. محاولة آلية محتملة.");
-                }
-
-                if (!isset($_SESSION['seen_proofs'])) $_SESSION['seen_proofs'] =[];
-                $_SESSION['seen_proofs'] = array_filter($_SESSION['seen_proofs'], function($ts) { return time() - $ts < 120; });
-                if (isset($_SESSION['seen_proofs'][$nonce])) {
-                    throw new Exception("تم اكتشاف محاولة مكررة. تم رفض الطلب.");
-                }
-                $_SESSION['seen_proofs'][$nonce] = time();
-
-            } catch (Exception $e) {
-                throw new Exception("فشل التحقق من أنك لست روبوت. يرجى تحديث الصفحة والمحاولة مجدداً.");
-            }
+            // تم إزالة التحقق من "أنك لست روبوت" (proof_token). الحماية متبقية عبر rate_limits و OTP_COOLDOWN_SECONDS.
 
             $ip_address = $_SERVER['REMOTE_ADDR'];
             $phone = preg_replace('/[^0-9]/', '', $input['phone'] ?? '');
